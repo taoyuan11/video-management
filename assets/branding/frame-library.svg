@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+  <title>帧库 · 叠帧</title>
+  <desc>Three collected video frames in Fluent blue, with a white play symbol.</desc>
+  <defs>
+    <linearGradient id="back" x1="158" y1="44" x2="446" y2="380" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#96ECFF"/>
+      <stop offset=".52" stop-color="#51CFFF"/>
+      <stop offset="1" stop-color="#0B96DF"/>
+    </linearGradient>
+    <linearGradient id="middle" x1="82" y1="82" x2="378" y2="418" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#48B8FF"/>
+      <stop offset=".5" stop-color="#178AE8"/>
+      <stop offset="1" stop-color="#0062BD"/>
+    </linearGradient>
+    <linearGradient id="front" x1="92" y1="132" x2="386" y2="452" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#168BF1"/>
+      <stop offset=".52" stop-color="#0069CC"/>
+      <stop offset="1" stop-color="#084AA4"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="116" y1="124" x2="326" y2="456" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#B7E9FF" stop-opacity=".65"/>
+      <stop offset=".55" stop-color="#79BBFF" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#003F91" stop-opacity=".32"/>
+    </linearGradient>
+    <linearGradient id="play" x1="192" y1="218" x2="288" y2="352" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E6F5FF"/>
+    </linearGradient>
+  </defs>
+  <rect x="120" y="48" width="332" height="354" rx="65" transform="rotate(8 286 225)" fill="url(#back)"/>
+  <rect x="120" y="48" width="332" height="354" rx="65" transform="rotate(8 286 225)" stroke="#D4F6FF" stroke-opacity=".6" stroke-width="2"/>
+  <rect x="76" y="86" width="338" height="352" rx="66" transform="rotate(-6 245 262)" fill="url(#middle)"/>
+  <rect x="76" y="86" width="338" height="352" rx="66" transform="rotate(-6 245 262)" stroke="#B4E6FF" stroke-opacity=".46" stroke-width="2"/>
+  <rect x="48" y="132" width="368" height="330" rx="72" fill="#03458E" fill-opacity=".18"/>
+  <rect x="48" y="124" width="368" height="330" rx="72" fill="url(#front)"/>
+  <rect x="49" y="125" width="366" height="328" rx="71" stroke="url(#edge)" stroke-width="2"/>
+  <path d="M191 229C191 218 202 212 211 218L313 280C322 285 322 297 313 302L211 364C202 370 191 364 191 353V229Z" fill="#003C8E" fill-opacity=".24"/>
+  <path d="M191 223C191 212 202 206 211 212L313 274C322 279 322 291 313 296L211 358C202 364 191 358 191 347V223Z" fill="url(#play)"/>
+</svg>

@@ -1,0 +1,8 @@
+# setup-deps.ps1 extracts the pinned MSVC x64 SDK here. Cargo resolves these
+# paths relative to the project root, including when launched by RustRover.
+# Explicit process environment overrides (for example env.ps1) take precedence.
+[env]
+GSTREAMER_1_0_ROOT_MSVC_X86_64 = { value = ".deps/gstreamer/PFiles64/gstreamer/1.0/msvc_x86_64", relative = true }
+GSTREAMER_1_0_ROOT_X86_64 = { value = ".deps/gstreamer/PFiles64/gstreamer/1.0/msvc_x86_64", relative = true }
+PKG_CONFIG = { value = ".deps/gstreamer/PFiles64/gstreamer/1.0/msvc_x86_64/bin/pkg-config.exe", relative = true }
+PKG_CONFIG_PATH = { value = ".deps/gstreamer/PFiles64/gstreamer/1.0/msvc_x86_64/lib/pkgconfig", relative = true }

@@ -1,0 +1,58 @@
+[package]
+name = "video-management"
+version = "0.1.7"
+edition = "2024"
+default-run = "video-management"
+
+[dependencies]
+anyhow = "1"
+crossbeam-channel = "0.5"
+notify = "8.2"
+rusqlite = { version = "0.41", features = ["bundled"] }
+sha2 = "0.11"
+walkdir = "2"
+dunce = "1"
+trash = "5.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+semver = { version = "1", features = ["serde"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }
+tempfile = "3"
+iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "crisp", "web-colors", "tokio", "advanced", "image-without-codecs"], optional = true }
+iced_video_player = { version = "0.6", optional = true }
+iced_wgpu = { version = "0.14", optional = true }
+gstreamer = { version = "0.23", optional = true }
+gstreamer-app = { version = "0.23", optional = true }
+gstreamer-video = { version = "0.23", optional = true }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+rfd = { version = "0.17", optional = true }
+url = { version = "2", optional = true }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_UI_Controls", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_System_Time", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }
+
+[build-dependencies]
+embed-resource = "3.0"
+
+[features]
+default = ["gui"]
+gui = ["dep:iced", "dep:iced_video_player", "dep:iced_wgpu", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:image", "dep:rfd", "dep:url"]
+
+[patch.crates-io]
+iced_wgpu = { path = "vendor/iced_wgpu" }
+iced_winit = { path = "vendor/iced_winit" }
+iced_video_player = { path = "vendor/iced_video_player" }
+
+[dev-dependencies]
+filetime = "0.2"
+
+[[bin]]
+name = "video-management"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[profile.release]
+lto = "thin"
+strip = "debuginfo"
+
+[[example]]
+name = "player_smoke"
+required-features = ["gui"]
