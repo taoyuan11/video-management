@@ -11,6 +11,7 @@ pub enum Sort {
     Recent,
     Name,
     Size,
+    Duration,
     Modified,
 }
 
@@ -36,6 +37,7 @@ impl Sort {
             Self::Recent => "最近导入",
             Self::Name => "名称",
             Self::Size => "大小",
+            Self::Duration => "时长",
             Self::Modified => "修改时间",
         }
     }
@@ -54,6 +56,24 @@ impl Sort {
             Self::Recent => videos.sort_by_key(|v| (v.created_at, v.id)),
             Self::Name => videos.sort_by_cached_key(|v| (v.title.to_lowercase(), v.id)),
             Self::Size => videos.sort_by_key(|v| (v.size(), v.id)),
+            Self::Duration => {
+                // Keep unknown durations last in either direction, and compare
+                // actual milliseconds rather than the rounded display string.
+                videos.sort_by(|a, b| match (a.duration_ms, b.duration_ms) {
+                    (Some(a_ms), Some(b_ms)) => {
+                        let cmp = (a_ms, a.id).cmp(&(b_ms, b.id));
+                        if order == SortOrder::Descending {
+                            cmp.reverse()
+                        } else {
+                            cmp
+                        }
+                    }
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => a.id.cmp(&b.id),
+                });
+                return;
+            }
             Self::Modified => videos.sort_by_key(|v| (modified(v, pending), v.id)),
         }
         if order == SortOrder::Descending {
@@ -176,6 +196,23 @@ pub fn modified(video: &VideoItem, pending: bool) -> Option<i64> {
         .max()
 }
 
+pub fn duration_label(millis: Option<u64>) -> String {
+    let Some(millis) = millis else {
+        return "未知".into();
+    };
+    let seconds = millis / 1000;
+    if seconds >= 3600 {
+        format!(
+            "{}:{:02}:{:02}",
+            seconds / 3600,
+            seconds / 60 % 60,
+            seconds % 60
+        )
+    } else {
+        format!("{:02}:{:02}", seconds / 60, seconds % 60)
+    }
+}
+
 fn utc_time(nanos: i64) -> Option<SYSTEMTIME> {
     if nanos <= 0 {
         return None;
@@ -219,6 +256,7 @@ mod tests {
             tag_ids: Vec::new(),
             library: true,
             created_at: id,
+            duration_ms: None,
             files: vec![VideoFile {
                 id,
                 video_id: id,
@@ -253,6 +291,54 @@ mod tests {
                 list.iter().map(|v| v.id).collect::<Vec<_>>(),
                 expected.into_iter().rev().collect::<Vec<_>>()
             );
+        }
+    }
+
+    #[test]
+    fn duration_sort_uses_milliseconds_with_stable_ties_and_unknowns_last() {
+        let videos: Vec<_> = [
+            Some(60_001),
+            None,
+            Some(9_000),
+            Some(60_000),
+            Some(60_000),
+            None,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, duration_ms)| {
+            let mut item = video(i as i64 + 1, "视频", 1, 1);
+            item.duration_ms = duration_ms;
+            item
+        })
+        .collect();
+        for pending in [false, true] {
+            let mut list: Vec<_> = videos.iter().rev().collect();
+            Sort::Duration.sort(&mut list, SortOrder::Ascending, pending);
+            assert_eq!(
+                list.iter().map(|v| v.id).collect::<Vec<_>>(),
+                [3, 4, 5, 1, 2, 6]
+            );
+            list.rotate_left(2);
+            Sort::Duration.sort(&mut list, SortOrder::Descending, pending);
+            assert_eq!(
+                list.iter().map(|v| v.id).collect::<Vec<_>>(),
+                [1, 5, 4, 3, 2, 6]
+            );
+        }
+    }
+
+    #[test]
+    fn duration_labels_cover_unknown_short_and_long_videos() {
+        for (millis, label) in [
+            (None, "未知"),
+            (Some(500), "00:00"),
+            (Some(59_999), "00:59"),
+            (Some(60_000), "01:00"),
+            (Some(3_661_000), "1:01:01"),
+            (Some(360_000_000), "100:00:00"),
+        ] {
+            assert_eq!(duration_label(millis), label);
         }
     }
 
@@ -362,6 +448,8 @@ mod tests {
             (Sort::Name, SortOrder::Descending),
             (Sort::Size, SortOrder::Descending),
             (Sort::Size, SortOrder::Ascending),
+            (Sort::Duration, SortOrder::Descending),
+            (Sort::Duration, SortOrder::Ascending),
             (Sort::Modified, SortOrder::Descending),
             (Sort::Modified, SortOrder::Ascending),
         ] {
@@ -383,6 +471,7 @@ mod tests {
         app.snapshot.videos = (1..=65)
             .map(|id| {
                 let mut item = video(id, &format!("视频{id:03}"), id as u64, id);
+                item.duration_ms = Some(id as u64 * 1_000);
                 item.files.push(VideoFile {
                     state: FileState::Pending,
                     ..item.files[0].clone()
@@ -412,5 +501,13 @@ mod tests {
         let _ = app.update(Message::SelectPage(false));
         assert_eq!(app.main_pane.selected, BTreeSet::from([61]));
         assert_eq!(app.pending_pane.page, 1);
+        let _ = app.update(Message::Sort(true, Sort::Duration));
+        assert_eq!(app.filtered(true)[0].id, 65);
+        assert_eq!(app.pending_pane.page, 0);
+        assert_eq!(app.pending_pane.selected, (1..=5).collect());
+        assert_eq!(app.main_pane.sort, Sort::Name);
+        assert_eq!(app.main_pane.selected, BTreeSet::from([61]));
+        let _ = app.update(Message::Sort(true, Sort::Duration));
+        assert_eq!(app.filtered(true)[0].id, 1);
     }
 }

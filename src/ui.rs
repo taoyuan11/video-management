@@ -1083,7 +1083,11 @@ impl App {
             Message::ClearError => self.error = None,
             Message::ClearUpdateNotice => self.update_notice = None,
             Message::ToggleDetails(p) => {
-                self.details_visible[usize::from(p)] = !self.details_visible[usize::from(p)]
+                self.details_visible[usize::from(p)] = !self.details_visible[usize::from(p)];
+                let owner = if p { self.pending } else { Some(self.main) };
+                if !self.details_visible[usize::from(p)] && owner == Some(self.player_window) {
+                    self.stop_player();
+                }
             }
             Message::ResizeDetails(p, width) => {
                 if width.is_finite() {

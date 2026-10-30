@@ -79,7 +79,14 @@ pub struct VideoItem {
     pub tag_ids: Vec<i64>,
     pub library: bool,
     pub created_at: i64,
+    pub duration_ms: Option<u64>,
     pub files: Vec<VideoFile>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DurationStatus {
+    pub hash: String,
+    pub checked: bool,
 }
 impl VideoItem {
     pub fn pending(&self) -> bool {

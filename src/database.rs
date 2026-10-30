@@ -2,7 +2,7 @@ use crate::model::*;
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -23,7 +23,7 @@ impl Database {
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
         )?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 2 {
+        if version > 3 {
             bail!("数据库由较新版本创建，请使用较新版本的软件");
         }
         if version == 0 {
@@ -61,6 +61,15 @@ impl Database {
             ).context("无法将分组迁移为标签，原有数据已保留")?;
             tx.commit()?;
         }
+        if version < 3 {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            tx.execute_batch(
+                "ALTER TABLE videos ADD COLUMN duration_ms INTEGER CHECK(duration_ms > 0);
+                ALTER TABLE videos ADD COLUMN duration_checked INTEGER NOT NULL DEFAULT 0;
+                PRAGMA user_version=3;",
+            )?;
+            tx.commit()?;
+        }
         Ok(Self { conn })
     }
 
@@ -81,7 +90,7 @@ impl Database {
         s.roots = q
             .query_map([], |r| Ok(PathBuf::from(r.get::<_, String>(0)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        let mut q = self.conn.prepare("SELECT id,hash,title,library,created_at FROM videos WHERE library=1 OR EXISTS(SELECT 1 FROM files WHERE video_id=videos.id AND state='pending') ORDER BY created_at DESC,id DESC")?;
+        let mut q = self.conn.prepare("SELECT id,hash,title,library,created_at,duration_ms FROM videos WHERE library=1 OR EXISTS(SELECT 1 FROM files WHERE video_id=videos.id AND state='pending') ORDER BY created_at DESC,id DESC")?;
         s.videos = q
             .query_map([], |r| {
                 Ok(VideoItem {
@@ -91,6 +100,10 @@ impl Database {
                     tag_ids: Vec::new(),
                     library: r.get(3)?,
                     created_at: r.get(4)?,
+                    duration_ms: r
+                        .get::<_, Option<i64>>(5)?
+                        .filter(|ms| *ms > 0)
+                        .map(|ms| ms as u64),
                     files: Vec::new(),
                 })
             })?
@@ -118,6 +131,36 @@ impl Database {
             }
         }
         Ok(s)
+    }
+
+    pub fn duration_status(&self, retry_unknown: bool) -> Result<BTreeMap<i64, DurationStatus>> {
+        let mut q = self.conn.prepare(
+            "SELECT id,hash,duration_checked AND (?=0 OR duration_ms IS NOT NULL) FROM videos",
+        )?;
+        Ok(q.query_map([retry_unknown], |r| {
+            Ok((
+                r.get(0)?,
+                DurationStatus {
+                    hash: r.get(1)?,
+                    checked: r.get(2)?,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_duration(&self, hash: &str, duration_ms: Option<u64>) -> Result<()> {
+        // Content identity keeps late results away from a replaced file. Failed
+        // reads never overwrite a successful result from another copy.
+        let duration_ms = duration_ms
+            .filter(|ms| *ms > 0)
+            .map(i64::try_from)
+            .transpose()?;
+        self.conn.execute(
+            "UPDATE videos SET duration_ms=COALESCE(duration_ms,?),duration_checked=1 WHERE hash=?",
+            params![duration_ms, hash],
+        )?;
+        Ok(())
     }
 
     pub fn files(&self) -> Result<Vec<VideoFile>> {

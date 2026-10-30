@@ -2,6 +2,57 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use url::Url;
 
+/// Read container duration without decoding frames, playing audio or opening a window.
+pub fn duration_ms(path: &Path, cancel: &std::sync::atomic::AtomicBool) -> Result<Option<u64>> {
+    use gstreamer::{self as gst, prelude::*};
+    use std::{
+        sync::atomic::Ordering,
+        time::{Duration, Instant},
+    };
+
+    struct Pipeline(gst::Pipeline);
+    impl Drop for Pipeline {
+        fn drop(&mut self) {
+            let _ = self.0.set_state(gst::State::Null);
+        }
+    }
+
+    anyhow::ensure!(!cancel.load(Ordering::Relaxed), "时长读取已取消");
+    gst::init()?;
+    let pipeline = Pipeline(
+        gst::parse::launch(
+            "filesrc name=source ! parsebin ! fakesink sync=false enable-last-sample=false",
+        )?
+        .downcast::<gst::Pipeline>()
+        .map_err(|_| anyhow::anyhow!("无法创建时长读取管线"))?,
+    );
+    pipeline
+        .0
+        .by_name("source")
+        .context("无法创建文件源")?
+        .set_property("location", path.to_str().context("视频路径包含无效字符")?);
+    let bus = pipeline.0.bus().context("无法读取媒体状态")?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    pipeline.0.set_state(gst::State::Paused)?;
+    loop {
+        anyhow::ensure!(!cancel.load(Ordering::Relaxed), "时长读取已取消");
+        anyhow::ensure!(Instant::now() < deadline, "时长读取超时");
+        if let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(50)) {
+            match message.view() {
+                gst::MessageView::Error(error) => anyhow::bail!("{}", error.error()),
+                gst::MessageView::AsyncDone(_) | gst::MessageView::Eos(_) => {
+                    return Ok(pipeline
+                        .0
+                        .query_duration::<gst::ClockTime>()
+                        .map(|time| time.mseconds())
+                        .filter(|ms| *ms > 0));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// File URI accepted by GStreamer's Windows file source.
 pub fn file_uri(path: &Path) -> Result<Url> {
     anyhow::ensure!(path.is_absolute(), "视频路径必须为绝对路径");

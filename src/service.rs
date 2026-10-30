@@ -432,7 +432,7 @@ fn run(
                         "扫描已取消".to_string()
                     } else {
                         format!(
-                            "扫描完成 · {} 个文件已校验 · {deferred} 个稍后重试",
+                            "扫描完成 · {} 个文件已处理 · {deferred} 个稍后重试",
                             a.stats.done.load(Ordering::Relaxed)
                         )
                     };
@@ -454,6 +454,7 @@ fn run(
                 known: db.files()?,
                 explicit: std::mem::take(&mut explicit),
                 full,
+                durations: db.duration_status(full)?,
             };
             let cancel = Arc::new(AtomicBool::new(false));
             let stats = Arc::new(ScanStats::default());
@@ -515,6 +516,10 @@ fn apply_scan(
         }
         ScanEvent::Availability(path, a) => {
             db.availability(&path, a)?;
+            *dirty = true;
+        }
+        ScanEvent::Duration(hash, duration_ms) => {
+            db.set_duration(&hash, duration_ms)?;
             *dirty = true;
         }
         ScanEvent::Warning(w) => {

@@ -132,7 +132,7 @@ fn migration_preserves_all_states_empty_groups_and_other_data_and_runs_once() {
     assert_eq!(
         conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        2
+        3
     );
     assert_eq!(
         conn.query_row(

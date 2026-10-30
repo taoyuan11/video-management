@@ -129,8 +129,115 @@ impl Drop for Jobs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::{App, Message};
     use gstreamer::{self as gst, prelude::*};
     use std::sync::mpsc;
+
+    fn wait_for(mut condition: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !condition() {
+            assert!(Instant::now() < deadline, "playback did not settle");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn closing_details_stops_only_its_player_and_reopening_does_not_resume() {
+        gst::init().unwrap();
+        for pending in [false, true] {
+            for paused in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let (mut app, _) = App::boot(dir.path().into(), None, None);
+                if let Some(mut service) = app.service.take() {
+                    service.shutdown();
+                }
+                let pending_window = iced::window::Id::unique();
+                app.pending = Some(pending_window);
+                app.player_window = if pending { pending_window } else { app.main };
+                let pipeline = gst::parse::launch(
+                    "videotestsrc ! video/x-raw,format=NV12,width=16,height=16 ! appsink name=output",
+                )
+                .unwrap()
+                .downcast::<gst::Pipeline>()
+                .unwrap();
+                let sink = pipeline
+                    .by_name("output")
+                    .unwrap()
+                    .downcast::<gstreamer_app::AppSink>()
+                    .unwrap();
+                let mut video = Video::from_gst_pipeline(pipeline.clone(), sink, None).unwrap();
+                video.set_paused(paused);
+                let state = if paused {
+                    gst::State::Paused
+                } else {
+                    gst::State::Playing
+                };
+                wait_for(|| pipeline.current_state() == state);
+                app.player = Some(video);
+                app.playing_file = Some(7);
+                app.position = 2.0;
+                app.dragging = true;
+                app.resume_after_seek = true;
+
+                let _ = app.update(Message::ToggleDetails(!pending));
+                assert!(app.player.is_some());
+                assert_eq!(app.playing_file, Some(7));
+                assert_eq!(pipeline.current_state(), state);
+
+                let _ = app.update(Message::ToggleDetails(pending));
+                assert!(!app.details_visible[usize::from(pending)]);
+                assert!(app.player.is_none());
+                assert!(app.playing_file.is_none());
+                assert_eq!(app.position, 0.0);
+                assert!(!app.dragging);
+                assert!(!app.resume_after_seek);
+                wait_for(|| app.playback_jobs.is_idle());
+                assert_eq!(pipeline.current_state(), gst::State::Null);
+
+                let _ = app.update(Message::ToggleDetails(pending));
+                assert!(app.details_visible[usize::from(pending)]);
+                assert!(app.player.is_none());
+                assert!(app.loader.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn closing_details_cancels_only_its_inflight_load() {
+        for pending in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut app, _) = App::boot(dir.path().into(), None, None);
+            if let Some(mut service) = app.service.take() {
+                service.shutdown();
+            }
+            let pending_window = iced::window::Id::unique();
+            app.pending = Some(pending_window);
+            app.player_window = if pending { pending_window } else { app.main };
+            let (release, resume) = mpsc::channel::<()>();
+            let load = Load::spawn(move |_| {
+                let _ = resume.recv();
+                Err("cancelled".into())
+            })
+            .unwrap();
+            let token = load.cancel.clone();
+            app.loader = Some(load);
+            app.playing_file = Some(7);
+
+            let _ = app.update(Message::ToggleDetails(!pending));
+            assert!(app.loader.is_some());
+            assert!(!token.load(Ordering::Acquire));
+
+            let _ = app.update(Message::ToggleDetails(pending));
+            assert!(app.loader.is_none());
+            assert!(app.playing_file.is_none());
+            assert!(token.load(Ordering::Acquire));
+            drop(release);
+            wait_for(|| app.playback_jobs.is_idle());
+            let _ = app.update(Message::Tick);
+            assert!(app.player.is_none());
+            assert!(app.error.is_none());
+        }
+    }
 
     #[test]
     fn cancelling_stuck_loads_is_immediate_and_bounds_retries() {

@@ -122,7 +122,11 @@ impl App {
             let visible = self.details_visible[usize::from(pending)];
             let enabled = visible && self.dialog.as_ref().is_none_or(|(owner, _)| *owner != id);
             row![
-                self.library(pending, id),
+                widget::responsive(move |size| self.library(
+                    pending,
+                    id,
+                    size.width < LIST_COMPACT_WIDTH
+                )),
                 motion::details(
                     visible,
                     width,
@@ -457,7 +461,7 @@ impl App {
         .into()
     }
 
-    fn library(&self, pending: bool, id: window::Id) -> Element<'_, Message> {
+    fn library(&self, pending: bool, id: window::Id, compact: bool) -> Element<'_, Message> {
         let colors = self.colors();
         let pane = self.pane(pending);
         let videos = self.filtered(pending);
@@ -524,6 +528,7 @@ impl App {
                             .size(18)
                             .on_toggle(move |_| Message::SelectPage(pending)),
                         self.sort_heading(pending, Sort::Name, Fill),
+                        self.sort_heading(pending, Sort::Duration, LIST_DURATION_WIDTH.into()),
                         self.sort_heading(pending, Sort::Size, LIST_SIZE_WIDTH.into()),
                         self.sort_heading(pending, Sort::Modified, LIST_MODIFIED_WIDTH.into()),
                         space::horizontal().width(31),
@@ -565,33 +570,42 @@ impl App {
                                 FileState::Managed
                             }
                 });
+                let title = column![
+                    text(&v.title).size(14).wrapping(text::Wrapping::Glyph),
+                    text(meta)
+                        .size(11)
+                        .wrapping(text::Wrapping::Glyph)
+                        .color(if v.missing() {
+                            colors.danger
+                        } else {
+                            colors.muted
+                        })
+                ]
+                .spacing(6)
+                .width(Fill);
+                // Keep names readable at the supported minimum window width.
+                let name: Element<_> = if compact {
+                    column![self.cover_thumbnail(v), title].spacing(8).into()
+                } else {
+                    row![self.cover_thumbnail(v), title]
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .into()
+                };
                 let entry = row![
                     checkbox(pane.selected.contains(&v.id))
                         .size(18)
                         .on_toggle(move |on| Message::Check(pending, video_id, on)),
-                    button(
-                        row![
-                            self.cover_thumbnail(v),
-                            column![
-                                text(&v.title).size(14).wrapping(text::Wrapping::Glyph),
-                                text(meta).size(11).wrapping(text::Wrapping::Glyph).color(
-                                    if v.missing() {
-                                        colors.danger
-                                    } else {
-                                        colors.muted
-                                    }
-                                )
-                            ]
-                            .spacing(6)
-                            .width(Fill),
-                        ]
-                        .spacing(8)
-                        .align_y(Alignment::Center)
-                    )
-                    .width(Fill)
-                    .padding([10, 0])
-                    .style(quiet)
-                    .on_press(Message::Select(pending, v.id)),
+                    button(name)
+                        .width(Fill)
+                        .padding([10, 0])
+                        .style(quiet)
+                        .on_press(Message::Select(pending, v.id)),
+                    text(listing::duration_label(v.duration_ms))
+                        .size(12)
+                        .color(colors.muted)
+                        .wrapping(text::Wrapping::Glyph)
+                        .width(LIST_DURATION_WIDTH),
                     text(bytes_label(v.size()))
                         .size(12)
                         .color(colors.muted)

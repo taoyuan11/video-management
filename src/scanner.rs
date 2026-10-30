@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use crossbeam_channel::Sender;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs::{self, Metadata, OpenOptions},
     io::Read,
     os::windows::fs::{MetadataExt, OpenOptionsExt},
@@ -50,10 +50,12 @@ pub struct ScanRequest {
     pub known: Vec<VideoFile>,
     pub explicit: Vec<PathBuf>,
     pub full: bool,
+    pub durations: BTreeMap<i64, DurationStatus>,
 }
 pub enum ScanEvent {
     Availability(PathBuf, Availability),
     Found(Fingerprint),
+    Duration(String, Option<u64>),
     Warning(String),
     Retry(PathBuf),
     Finished,
@@ -182,6 +184,14 @@ pub fn scan(
         .iter()
         .map(|f| (path_key(&f.path), f))
         .collect();
+    let cached_durations = Arc::new(
+        request
+            .durations
+            .values()
+            .filter(|status| status.checked)
+            .map(|status| status.hash.clone())
+            .collect::<HashSet<_>>(),
+    );
     let jobs: Vec<_> = paths
         .into_iter()
         .filter_map(|(key, (path, explicit))| {
@@ -192,14 +202,33 @@ pub fn scan(
                 && old.size == meta.len()
                 && old.modified == modified(&meta)
             {
-                return None;
+                // Backfill existing libraries without rehashing unchanged files.
+                return request
+                    .durations
+                    .get(&old.video_id)
+                    .filter(|status| {
+                        cfg!(feature = "gui") && !status.checked && old.state != FileState::Ignored
+                    })
+                    .map(|status| {
+                        (
+                            path,
+                            explicit,
+                            Some(Fingerprint {
+                                path: old.path.clone(),
+                                size: old.size,
+                                modified: old.modified,
+                                hash: status.hash.clone(),
+                                explicit,
+                            }),
+                        )
+                    });
             }
-            Some((path, explicit))
+            Some((path, explicit, None))
         })
         .collect();
     stats.total.store(jobs.len(), Ordering::Relaxed);
     let (complete, completed) = crossbeam_channel::unbounded::<()>();
-    for (path, explicit) in jobs {
+    for (path, explicit, metadata_only) in jobs {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
@@ -209,6 +238,7 @@ pub fn scan(
             sender.clone(),
             complete.clone(),
         );
+        let cached_durations = cached_durations.clone();
         executor.submit(Lane::Scan, cancel.clone(), move || {
             // Dropping this sender also completes cancelled queued jobs and panics.
             let _done = done;
@@ -229,9 +259,18 @@ pub fn scan(
                     std::thread::sleep(Duration::from_millis(100));
                 }
             }
-            match fingerprint(&path, explicit, &cancel, &stats) {
+            let metadata_only_job = metadata_only.is_some();
+            match metadata_only
+                .map(Ok)
+                .unwrap_or_else(|| fingerprint(&path, explicit, &cancel, &stats))
+            {
                 Ok(found) => {
-                    let _ = sender.send(ScanEvent::Found(found));
+                    if !metadata_only_job {
+                        let _ = sender.send(ScanEvent::Found(found.clone()));
+                    }
+                    if !cached_durations.contains(&found.hash) {
+                        read_duration(&found, &cancel, &sender);
+                    }
                 }
                 Err(e) => {
                     stats.deferred.fetch_add(1, Ordering::Relaxed);
@@ -259,6 +298,32 @@ pub fn scan(
     }
     let _ = sender.send(ScanEvent::Finished);
 }
+
+#[cfg(feature = "gui")]
+fn read_duration(found: &Fingerprint, cancel: &AtomicBool, sender: &Sender<ScanEvent>) {
+    // Keep the same deny-write guard as hashing while reading container metadata.
+    // A missing, locked or replaced source remains eligible for a later scan.
+    let Ok(file) = OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(&found.path)
+    else {
+        return;
+    };
+    let matches = |meta: Metadata| meta.len() == found.size && modified(&meta) == found.modified;
+    if !file.metadata().is_ok_and(matches) {
+        return;
+    }
+    let duration = crate::media::duration_ms(&found.path, cancel)
+        .ok()
+        .flatten();
+    if !cancel.load(Ordering::Relaxed) && fs::metadata(&found.path).is_ok_and(matches) {
+        let _ = sender.send(ScanEvent::Duration(found.hash.clone(), duration));
+    }
+}
+
+#[cfg(not(feature = "gui"))]
+fn read_duration(_found: &Fingerprint, _cancel: &AtomicBool, _sender: &Sender<ScanEvent>) {}
 
 fn is_link(path: &Path) -> bool {
     let Ok(meta) = fs::symlink_metadata(path) else {

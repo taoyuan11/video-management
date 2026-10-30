@@ -40,6 +40,7 @@ fn scan(db: &mut Database, roots: Vec<PathBuf>, full: bool) {
         ScanRequest {
             roots,
             known: db.files().unwrap(),
+            durations: db.duration_status(full).unwrap(),
             explicit: vec![],
             full,
         },
@@ -54,6 +55,7 @@ fn scan(db: &mut Database, roots: Vec<PathBuf>, full: bool) {
                 db.observe(&f).unwrap();
             }
             ScanEvent::Availability(p, a) => db.availability(&p, a).unwrap(),
+            ScanEvent::Duration(hash, millis) => db.set_duration(&hash, millis).unwrap(),
             _ => {}
         }
     }
@@ -470,6 +472,7 @@ fn explicitly_imported_busy_file_is_retained_for_retry() {
             known: vec![],
             explicit: vec![path.clone()],
             full: false,
+            durations: Default::default(),
         },
         tx,
         Arc::new(AtomicBool::new(false)),
@@ -492,6 +495,7 @@ fn explicitly_imported_busy_file_is_retained_for_retry() {
             known: vec![],
             explicit: retry,
             full: false,
+            durations: Default::default(),
         },
         tx,
         Arc::new(AtomicBool::new(false)),

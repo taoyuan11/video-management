@@ -440,6 +440,7 @@ mod tests {
 
     fn video(id: i64, tags: &[i64], library: bool, pending: bool) -> VideoItem {
         VideoItem {
+            duration_ms: None,
             id,
             hash: format!("{id:064x}"),
             title: format!("视频{id}"),
