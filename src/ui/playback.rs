@@ -286,6 +286,32 @@ mod tests {
     }
 
     #[test]
+    fn opening_tag_management_cancels_only_main_window_loads() {
+        for pending in [false, true] {
+            let (_dir, mut app) = selection_app();
+            let (release, resume) = mpsc::channel::<()>();
+            let load = Load::spawn(move |_| {
+                let _ = resume.recv();
+                Err("obsolete load failure".into())
+            })
+            .unwrap();
+            let token = load.cancel.clone();
+            app.loader = Some(load);
+            app.player_window = if pending {
+                app.pending.unwrap()
+            } else {
+                app.main
+            };
+            let _ = app.update(Message::ShowTagManagement);
+            assert_eq!(token.load(Ordering::Acquire), !pending);
+            assert_eq!(app.loader.is_some(), pending);
+            app.stop_player();
+            drop(release);
+            wait_for(|| app.playback_jobs.is_idle());
+        }
+    }
+
+    #[test]
     fn idle_rows_show_details_and_missing_rows_cancel_previous_playback() {
         for pending in [false, true] {
             let (_dir, mut app) = selection_app();

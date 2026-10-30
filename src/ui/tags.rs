@@ -66,7 +66,7 @@ impl App {
         pane.tag_draft.clear();
     }
 
-    pub(super) fn reconcile_tags(&mut self) {
+    pub(super) fn reconcile_tags(&mut self) -> bool {
         let available: BTreeSet<_> = self.snapshot.tags.iter().map(|tag| tag.id).collect();
         self.main_pane.tag_draft.retain(|id| available.contains(id));
         self.pending_pane
@@ -75,14 +75,18 @@ impl App {
         if let Some((_, Dialog::Tags(picker))) = &mut self.dialog {
             picker.reconcile(&self.snapshot);
         }
-        if let Filter::Tag(id) = self.filter
-            && !available.contains(&id)
-        {
-            self.filter = Filter::All;
+        let previous = self.tag_filter.len();
+        self.tag_filter.retain(|id| available.contains(id));
+        self.tag_filter_focus = self.tag_filter_focus.min(self.snapshot.tags.len() + 2);
+        self.tag_management_focus = self
+            .tag_management_focus
+            .min(self.snapshot.tags.len() * 2 + 1);
+        if self.tag_filter.len() != previous {
             self.clear_tag_selection(false);
             self.main_pane.page = 0;
             self.main_pane.page_input = None;
         }
+        self.tag_filter.len() != previous
     }
 
     pub(super) fn open_tag_picker(&mut self, action: TagAction) {
@@ -172,11 +176,10 @@ impl App {
             _ => return Task::none(),
         }
         if picker.focus < ids.len() {
-            return iced::advanced::widget::operate(ScrollTagIntoView {
-                target: format!("tag-option-{}", ids[picker.focus]).into(),
-                viewport: None,
-                option: None,
-            });
+            return scroll_tag_into_view(
+                format!("tag-option-{}", ids[picker.focus]),
+                "tag-options",
+            );
         }
         Task::none()
     }
@@ -275,17 +278,12 @@ impl App {
                 )
                 .id(format!("tag-option-{tag_id}"))
                 .padding([4, 6])
-                .style(move |theme| container::Style {
-                    border: iced::Border {
-                        color: if picker.focus == index {
-                            palette(theme).accent
-                        } else {
-                            Color::TRANSPARENT
-                        },
-                        width: 2.0,
-                        radius: 8.0.into(),
-                    },
-                    ..Default::default()
+                .style(move |theme| {
+                    if picker.focus == index {
+                        focus_surface(theme)
+                    } else {
+                        container::Style::default()
+                    }
                 }),
             );
         }
@@ -294,7 +292,7 @@ impl App {
                 text(if picker.action == TagAction::Remove {
                     "所选视频没有可移除的标签。"
                 } else {
-                    "还没有标签。可返回列表，点击“新建标签”。"
+                    "还没有标签。可返回列表，打开“标签管理”新建标签。"
                 })
                 .size(13)
                 .color(colors.muted)
@@ -362,8 +360,18 @@ impl App {
 }
 
 // Measure the focused row after layout so wrapped names stay in view.
+pub(super) fn scroll_tag_into_view(target: String, scroll_id: &'static str) -> Task<Message> {
+    iced::advanced::widget::operate(ScrollTagIntoView {
+        target: target.into(),
+        scroll_id,
+        viewport: None,
+        option: None,
+    })
+}
+
 struct ScrollTagIntoView {
     target: iced::advanced::widget::Id,
+    scroll_id: &'static str,
     viewport: Option<(iced::Rectangle, iced::Rectangle)>,
     option: Option<iced::Rectangle>,
 }
@@ -390,7 +398,7 @@ impl iced::advanced::widget::Operation<Message> for ScrollTagIntoView {
         _translation: iced::Vector,
         _state: &mut dyn iced::advanced::widget::operation::Scrollable,
     ) {
-        if id == Some(&iced::advanced::widget::Id::from("tag-options")) {
+        if id == Some(&iced::advanced::widget::Id::from(self.scroll_id)) {
             self.viewport = Some((bounds, content_bounds));
         }
     }
@@ -400,7 +408,7 @@ impl iced::advanced::widget::Operation<Message> for ScrollTagIntoView {
         match (self.viewport, self.option) {
             (Some((viewport, content)), Some(option)) => {
                 Outcome::Chain(Box::new(scrollable::scroll_to(
-                    "tag-options".into(),
+                    self.scroll_id.into(),
                     scrollable::AbsoluteOffset {
                         x: None,
                         y: Some((option.y + option.height - content.y - viewport.height).max(0.0)),
@@ -418,20 +426,12 @@ fn picker_button(
     prominent: bool,
     focused: bool,
 ) -> widget::button::Style {
-    let mut style = if prominent {
+    let style = if prominent {
         primary(theme, status)
     } else {
         secondary(theme, status)
     };
-    if focused && status != widget::button::Status::Disabled {
-        style.border.color = if prominent {
-            palette(theme).ink
-        } else {
-            palette(theme).accent
-        };
-        style.border.width = 2.0;
-    }
-    style
+    button_focus(theme, status, focused, style)
 }
 
 #[cfg(test)]
@@ -498,14 +498,14 @@ mod tests {
     }
 
     #[test]
-    fn single_tag_filters_counts_and_summaries_support_multiple_tags() {
+    fn tag_filters_counts_and_summaries_support_multiple_tags() {
         let (_temp, mut app) = app();
         let mut copy = app.snapshot.videos[0].files[0].clone();
         copy.id = 10;
         app.snapshot.videos[0].files.push(copy);
         assert_eq!(app.tag_count(1), 1);
         assert_eq!(app.tag_count(2), 2);
-        let _ = app.update(Message::Filter(Filter::Tag(2)));
+        let _ = app.update(Message::TagFilterCheck(2, true));
         assert_eq!(
             app.filtered(false)
                 .iter()
@@ -513,6 +513,17 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from([1, 2])
         );
+        let _ = app.update(Message::TagFilterCheck(1, true));
+        assert_eq!(
+            app.filtered(false).iter().map(|v| v.id).collect::<Vec<_>>(),
+            vec![1]
+        );
+        let _ = app.update(Message::TagFilterCheck(3, true));
+        assert!(app.filtered(false).is_empty());
+        let _ = app.update(Message::TagFilterCheck(3, false));
+        assert_eq!(app.filtered(false).len(), 1);
+        let _ = app.update(Message::ClearTagFilter);
+        assert_eq!(app.filtered(false).len(), 3);
         let _ = app.update(Message::Filter(Filter::Untagged));
         assert_eq!(
             app.filtered(false).iter().map(|v| v.id).collect::<Vec<_>>(),
@@ -526,6 +537,99 @@ mod tests {
             vec!["标签1", "标签2", "标签3"]
         );
         assert_eq!(app.tag_summary(&app.snapshot.videos[2]), "无标签");
+    }
+
+    #[test]
+    fn tag_filters_combine_with_search_and_categories_and_do_not_filter_pending() {
+        let (_temp, mut app) = app();
+        let _ = app.update(Message::TagFilterCheck(2, true));
+        let _ = app.update(Message::Search(false, "视频2".into()));
+        assert_eq!(
+            app.filtered(false).iter().map(|v| v.id).collect::<Vec<_>>(),
+            vec![2]
+        );
+        let _ = app.update(Message::TagFilterCheck(1, true));
+        assert!(app.filtered(false).is_empty());
+        assert_eq!(app.filtered(true).len(), 2);
+        let _ = app.update(Message::TagFilterCheck(1, false));
+        app.snapshot.videos[1].files[0].availability = Availability::Missing;
+        let _ = app.update(Message::Filter(Filter::Missing));
+        assert_eq!(app.filtered(false).len(), 1);
+        let _ = app.update(Message::Filter(Filter::Untagged));
+        let _ = app.update(Message::Search(false, String::new()));
+        assert!(app.filtered(false).is_empty());
+        let _ = app.update(Message::ClearTagFilter);
+        assert_eq!(
+            app.filtered(false).iter().map(|v| v.id).collect::<Vec<_>>(),
+            vec![3]
+        );
+    }
+
+    #[test]
+    fn changing_tag_filters_resets_results_but_keeps_menu_open_and_pending_draft() {
+        let (_temp, mut app) = app();
+        app.main_pane.page = 2;
+        app.main_pane.page_input = Some("3".into());
+        app.main_pane.selected.insert(1);
+        app.main_pane.focus = Some(1);
+        app.main_pane.tag_draft.insert(4);
+        app.pending_pane.tag_draft.insert(3);
+        let _ = app.update(Message::TagFilterOpen(true));
+        let _ = app.update(Message::TagFilterCheck(1, true));
+        assert!(app.tag_filter_open);
+        assert_eq!(app.main_pane.page, 0);
+        assert!(app.main_pane.page_input.is_none());
+        assert!(app.main_pane.selected.is_empty());
+        assert!(app.main_pane.focus.is_none());
+        assert!(app.main_pane.tag_draft.is_empty());
+        assert_eq!(app.pending_pane.tag_draft, BTreeSet::from([3]));
+        let _ = app.update(Message::TagFilterCheck(999, true));
+        assert_eq!(app.tag_filter, BTreeSet::from([1]));
+        let _ = app.update(Message::TagFilterOpen(false));
+        assert_eq!(app.tag_filter, BTreeSet::from([1]));
+    }
+
+    #[test]
+    fn deleting_one_filter_preserves_remaining_filters_and_renaming_keeps_selection() {
+        let (_temp, mut app) = app();
+        app.tag_filter.extend([1, 2]);
+        app.snapshot.tags[0].name = "重命名后的标签".into();
+        assert!(!app.reconcile_tags());
+        assert_eq!(app.tag_filter, BTreeSet::from([1, 2]));
+        app.snapshot.tags.retain(|tag| tag.id != 1);
+        assert!(app.reconcile_tags());
+        assert_eq!(app.tag_filter, BTreeSet::from([2]));
+        assert_eq!(app.filtered(false).len(), 2);
+    }
+
+    #[test]
+    fn tag_filter_keyboard_supports_multi_select_management_and_empty_menu() {
+        use iced::keyboard::key::Named;
+        let (_temp, mut app) = app();
+        let _ = app.update(Message::TagFilterOpen(true));
+        let _ = app.update(Message::TagFilterKey(Named::Space, false));
+        let _ = app.update(Message::TagFilterKey(Named::Tab, false));
+        let _ = app.update(Message::TagFilterKey(Named::Enter, false));
+        assert_eq!(app.tag_filter, BTreeSet::from([1, 2]));
+        assert!(app.tag_filter_open);
+        let _ = app.update(Message::TagFilterKey(Named::End, false));
+        let _ = app.update(Message::TagFilterKey(Named::Tab, true));
+        let _ = app.update(Message::TagFilterKey(Named::Tab, true));
+        let _ = app.update(Message::TagFilterKey(Named::Enter, false));
+        assert_eq!(app.page, MainPage::Tags);
+        assert!(app.dialog.is_none());
+        assert!(!app.tag_filter_open);
+        let _ = app.update(Message::Dismiss);
+        app.snapshot.tags.clear();
+        app.reconcile_tags();
+        let _ = app.update(Message::TagFilterOpen(true));
+        let _ = app.update(Message::TagFilterKey(Named::Tab, false));
+        assert_eq!(app.tag_filter_focus, 2); // Skip disabled clear.
+        let _ = app.update(Message::TagFilterKey(Named::Tab, true));
+        assert_eq!(app.tag_filter_focus, 0);
+        let _ = app.update(Message::TagFilterKey(Named::Enter, false));
+        assert_eq!(app.page, MainPage::Tags);
+        assert!(!app.tag_filter_open);
     }
 
     #[test]
@@ -603,7 +707,7 @@ mod tests {
         assert_eq!(picker(&app).ids, vec![1, 65]);
         let _ = app.update(Message::Dismiss);
         app.main_pane.tag_draft.insert(1);
-        let _ = app.update(Message::Filter(Filter::Tag(1)));
+        let _ = app.update(Message::TagFilterCheck(1, true));
         assert!(app.main_pane.selected.is_empty());
         assert!(app.main_pane.tag_draft.is_empty());
         app.pending_pane.selected.insert(1);
@@ -621,7 +725,7 @@ mod tests {
     #[test]
     fn deleted_tags_are_removed_from_drafts_and_active_filter_returns_to_all() {
         let (_temp, mut app) = app();
-        app.filter = Filter::Tag(2);
+        app.tag_filter.insert(2);
         app.main_pane.selected.insert(1);
         app.pending_pane.tag_draft.extend([1, 2]);
         let _ = app.update(Message::PickTags(TagAction::Remove));
@@ -629,6 +733,7 @@ mod tests {
         app.snapshot.tags.retain(|t| t.id != 2);
         app.reconcile_tags();
         assert_eq!(app.filter, Filter::All);
+        assert!(app.tag_filter.is_empty());
         assert_eq!(app.pending_pane.tag_draft, BTreeSet::from([1]));
         assert!(picker(&app).selected.is_empty());
         let _ = app.update(Message::SaveTagSelection);

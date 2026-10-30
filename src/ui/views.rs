@@ -26,9 +26,9 @@ fn modified_cell(video: &VideoItem, pending: bool, colors: Palette) -> Element<'
 }
 
 fn page_arrow(glyph: char, message: Option<Message>) -> Element<'static, Message> {
-    button(icon(glyph, 12))
+    button(button_icon(glyph, 12))
         .style(quiet)
-        .padding(8)
+        .padding([6, 8])
         .on_press_maybe(message)
         .into()
 }
@@ -43,13 +43,6 @@ impl App {
             Filter::Untagged => "无标签".into(),
             Filter::Duplicates => "重复副本".into(),
             Filter::Missing => "缺失文件".into(),
-            Filter::Tag(id) => self
-                .snapshot
-                .tags
-                .iter()
-                .find(|g| g.id == id)
-                .map(|g| g.name.clone())
-                .unwrap_or_default(),
         }
     }
 
@@ -67,55 +60,12 @@ impl App {
                 .into();
         }
         let pending = Some(id) == self.pending;
-        let count = self.filtered(pending).len();
-        let description = if pending {
-            "预览新发现的视频，选择标签后加入资料库"
-        } else {
-            match self.filter {
-                Filter::All => "集中浏览与整理你的本地视频",
-                Filter::Untagged => "为这些视频找到合适的位置",
-                Filter::Duplicates => "相同内容已合并，在详情中查看每个副本",
-                Filter::Missing => "查看离线、已移动或暂时无法访问的文件",
-                Filter::Tag(_) => "按主题整理，随时找到需要的视频",
-            }
-        };
-        let header = row![
-            column![
-                row![
-                    heading(self.section_title(pending), 28),
-                    badge(self.colors(), format!("{count}"), false)
-                ]
-                .spacing(12)
-                .align_y(Alignment::Center),
-                text(description).size(13).color(colors.muted),
-            ]
-            .spacing(8)
-            .width(Fill),
-            button(label(FOLDER, "添加文件夹"))
-                .style(secondary)
-                .padding([10, 14])
-                .on_press(Message::PickRoots),
-            button(label(ADD, "导入视频"))
-                .style(primary)
-                .padding([10, 16])
-                .on_press(Message::Import),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center);
-
-        let showing_settings = self.settings_page && !pending;
-        let header: Element<_> = if showing_settings {
-            column![
-                heading("设置", 28),
-                text("按你的习惯调整视频处理与外观")
-                    .size(13)
-                    .color(colors.muted)
-            ]
-            .spacing(8)
-            .into()
-        } else {
-            header.into()
-        };
+        let showing_settings = self.page == MainPage::Settings && !pending;
+        let showing_tags = self.page == MainPage::Tags && !pending;
+        let header = widget::responsive(move |size| {
+            self.workspace_header(pending, !pending && size.width < HEADER_COMPACT_WIDTH)
+        })
+        .height(Length::Shrink);
         let body = widget::responsive(move |size| {
             let maximum = resize::maximum_width(size.width);
             let width = self.details_width[usize::from(pending)].clamp(DETAILS_MIN_WIDTH, maximum);
@@ -210,6 +160,8 @@ impl App {
         }
         let body: Element<_> = if showing_settings {
             self.settings_view()
+        } else if showing_tags {
+            self.tag_management_view()
         } else {
             body.into()
         };
@@ -266,6 +218,105 @@ impl App {
         base
     }
 
+    fn workspace_header(&self, pending: bool, compact: bool) -> Element<'_, Message> {
+        let colors = self.colors();
+        if !pending && self.page == MainPage::Tags {
+            return self.tag_management_header(compact);
+        }
+        if !pending && self.page == MainPage::Settings {
+            let title = column![
+                heading("设置", 28),
+                text("按你的习惯调整视频处理与外观")
+                    .size(13)
+                    .color(colors.muted)
+            ]
+            .spacing(8)
+            .width(Fill);
+            return self.page_header(title.into(), None, true, compact);
+        }
+        let count = self.filtered(pending).len();
+        let description = if pending {
+            "预览新发现的视频，选择标签后加入资料库"
+        } else {
+            match self.filter {
+                Filter::All => "集中浏览与整理你的本地视频",
+                Filter::Untagged => "为这些视频找到合适的位置",
+                Filter::Duplicates => "相同内容已合并，在详情中查看每个副本",
+                Filter::Missing => "查看离线、已移动或暂时无法访问的文件",
+            }
+        };
+        let title = column![
+            row![
+                heading(self.section_title(pending), 28),
+                badge(colors, count.to_string(), false)
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+            text(description).size(13).color(colors.muted),
+        ]
+        .spacing(8)
+        .width(Fill);
+        let actions = row![
+            button(label(FOLDER, "添加文件夹"))
+                .style(secondary)
+                .padding([10, 14])
+                .on_press(Message::PickRoots),
+            button(label(ADD, "导入视频"))
+                .style(primary)
+                .padding([10, 16])
+                .on_press(Message::Import),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        self.page_header(title.into(), Some(actions.into()), !pending, compact)
+    }
+
+    pub(super) fn page_header<'a>(
+        &'a self,
+        title: Element<'a, Message>,
+        actions: Option<Element<'a, Message>>,
+        show_pending: bool,
+        compact: bool,
+    ) -> Element<'a, Message> {
+        let mut header = row![title].spacing(16).align_y(Alignment::Center);
+        // Keep the window launcher at the top right, even when page commands wrap.
+        if compact {
+            if show_pending {
+                header = header.push(self.pending_window_button());
+            }
+            let mut content = column![header].spacing(12);
+            if let Some(actions) = actions {
+                content = content.push(container(actions).align_right(Fill));
+            }
+            content.into()
+        } else {
+            if let Some(actions) = actions {
+                header = header.push(actions);
+            }
+            if show_pending {
+                header = header.push(self.pending_window_button());
+            }
+            header.into()
+        }
+    }
+
+    fn pending_window_button(&self) -> Element<'_, Message> {
+        let pending = self.snapshot.videos.iter().filter(|v| v.pending()).count();
+        button(
+            row![
+                label(OPEN_WINDOW, "待处理视频"),
+                badge(self.colors(), pending.to_string(), pending > 0)
+            ]
+            .spacing(8)
+            .height(BUTTON_CONTENT_HEIGHT)
+            .align_y(Alignment::Center),
+        )
+        .style(secondary)
+        .padding([10, 14])
+        .on_press(Message::OpenPending)
+        .into()
+    }
+
     fn nav_item(
         &self,
         glyph: char,
@@ -273,8 +324,24 @@ impl App {
         count: usize,
         filter: Filter,
     ) -> Element<'_, Message> {
+        self.navigation_item(
+            glyph,
+            title,
+            count,
+            self.page == MainPage::Library && self.filter == filter,
+            Message::Filter(filter),
+        )
+    }
+
+    fn navigation_item(
+        &self,
+        glyph: char,
+        title: String,
+        count: usize,
+        active: bool,
+        message: Message,
+    ) -> Element<'_, Message> {
         let colors = self.colors();
-        let active = !self.settings_page && self.filter == filter;
         let marker =
             container(space::horizontal().width(3).height(18)).style(move |_| container::Style {
                 background: Some(
@@ -303,7 +370,7 @@ impl App {
         )
         .padding([11, 8])
         .width(Fill)
-        .on_press(Message::Filter(filter))
+        .on_press(message)
         .style(move |theme, status| item(theme, active, status))
         .into()
     }
@@ -311,7 +378,6 @@ impl App {
     fn sidebar(&self) -> Element<'_, Message> {
         let colors = self.colors();
         let library: Vec<_> = self.snapshot.videos.iter().filter(|v| v.library).collect();
-        let pending = self.snapshot.videos.iter().filter(|v| v.pending()).count();
         let brand = row![
             widget::image(branding::logo()).width(40).height(40),
             column![
@@ -322,7 +388,7 @@ impl App {
         ]
         .spacing(12)
         .align_y(Alignment::Center);
-        let mut navigation = column![
+        let navigation = column![
             container(text("资料库").size(12).color(colors.muted)).padding([0, 12]),
             self.nav_item(LIBRARY, "全部视频".into(), library.len(), Filter::All),
             self.nav_item(
@@ -350,66 +416,16 @@ impl App {
                 library.iter().filter(|v| v.missing()).count(),
                 Filter::Missing
             ),
-            space::vertical().height(8),
-            button(
-                row![
-                    icon(INBOX, 17),
-                    text("待处理视频").size(13).width(Fill),
-                    badge(self.colors(), pending.to_string(), pending > 0)
-                ]
-                .spacing(12)
-                .align_y(Alignment::Center)
-            )
-            .padding([10, 12])
-            .style(quiet)
-            .width(Fill)
-            .on_press(Message::OpenPending),
             container(widget::rule::horizontal(1).style(separator)).padding([12, 8]),
-            row![
-                text("我的标签").size(12).color(colors.muted).width(Fill),
-                button(icon(ADD, 14))
-                    .padding(8)
-                    .style(quiet)
-                    .on_press(Message::NewTag(self.main))
-            ]
-            .padding([0, 12])
-            .align_y(Alignment::Center),
+            self.navigation_item(
+                TAG,
+                "标签管理".into(),
+                self.snapshot.tags.len(),
+                self.page == MainPage::Tags,
+                Message::ShowTagManagement
+            ),
         ]
         .spacing(4);
-        for tag in &self.snapshot.tags {
-            navigation = navigation.push(self.nav_item(
-                TAG,
-                tag.name.clone(),
-                self.tag_count(tag.id),
-                Filter::Tag(tag.id),
-            ));
-        }
-        if self.snapshot.tags.is_empty() {
-            navigation = navigation.push(
-                container(
-                    text("按主题建立你的第一个标签")
-                        .size(11)
-                        .color(colors.muted),
-                )
-                .padding([8, 12]),
-            );
-        }
-        if let Filter::Tag(id) = self.filter {
-            navigation = navigation.push(
-                row![
-                    button(button_text("重命名").size(12))
-                        .padding(8)
-                        .style(quiet)
-                        .on_press(Message::EditTag(id)),
-                    button(button_text("删除标签").size(12))
-                        .padding(8)
-                        .style(quiet)
-                        .on_press(Message::DeleteTag(id)),
-                ]
-                .spacing(4)
-                .padding([4, 12]),
-            );
-        }
         container(
             column![
                 container(brand).padding([16, 12]),
@@ -434,7 +450,11 @@ impl App {
                 .width(Fill)
                 .on_press(Message::ShowRoots),
                 button(label('\u{E713}', "设置"))
-                    .style(move |theme, status| item(theme, self.settings_page, status))
+                    .style(move |theme, status| item(
+                        theme,
+                        self.page == MainPage::Settings,
+                        status
+                    ))
                     .padding(12)
                     .width(Fill)
                     .on_press(Message::ShowSettings),
@@ -443,15 +463,6 @@ impl App {
                     .padding(12)
                     .width(Fill)
                     .on_press(Message::ShowUpdates),
-                container(
-                    row![
-                        icon('\u{E753}', 14).color(colors.muted),
-                        text("本地存储 · 自在管理").size(11).color(colors.muted)
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                )
-                .padding([4, 12]),
             ]
             .spacing(16),
         )
@@ -486,20 +497,22 @@ impl App {
             .size(13)
             .padding([9, 12])
             .style(input);
-        let controls = row![
-            search,
-            self.sort_heading(pending, Sort::Recent, Length::Shrink),
-            button(icon(INFO, 17))
-                .padding(10)
-                .style(move |theme, status| item(
-                    theme,
-                    self.details_visible[usize::from(pending)],
-                    status
-                ))
-                .on_press(Message::ToggleDetails(pending)),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center);
+        let mut controls = row![search];
+        if !pending {
+            controls = controls.push(self.tag_filter_view());
+        }
+        let controls = controls
+            .push(self.sort_heading(pending, Sort::Recent, Length::Shrink))
+            .push(
+                button(button_icon(INFO, 17))
+                    .padding(10)
+                    .style(move |theme, status| {
+                        item(theme, self.details_visible[usize::from(pending)], status)
+                    })
+                    .on_press(Message::ToggleDetails(pending)),
+            )
+            .spacing(8)
+            .align_y(Alignment::Center);
         let mut content = column![container(controls).padding(16)].spacing(0);
         if self.library_loading {
             content = content.push(
@@ -516,7 +529,7 @@ impl App {
             );
         } else if total == 0 {
             content = content.push(motion::enter(
-                (self.filter, pending),
+                (self.filter, &self.tag_filter, pending),
                 self.empty_state(pending),
             ));
         } else {
@@ -531,7 +544,6 @@ impl App {
                         self.sort_heading(pending, Sort::Duration, LIST_DURATION_WIDTH.into()),
                         self.sort_heading(pending, Sort::Size, LIST_SIZE_WIDTH.into()),
                         self.sort_heading(pending, Sort::Modified, LIST_MODIFIED_WIDTH.into()),
-                        space::horizontal().width(31),
                     ]
                     .spacing(LIST_COLUMN_SPACING)
                     .align_y(Alignment::Center),
@@ -561,15 +573,6 @@ impl App {
                 } else {
                     format!("{tag}  ·  {}", extension(v))
                 };
-                let playable = v.files.iter().find(|f| {
-                    f.availability == Availability::Present
-                        && f.state
-                            == if pending {
-                                FileState::Pending
-                            } else {
-                                FileState::Managed
-                            }
-                });
                 let title = column![
                     text(&v.title).size(14).wrapping(text::Wrapping::Glyph),
                     text(meta)
@@ -607,10 +610,6 @@ impl App {
                         .color(colors.muted)
                         .width(LIST_SIZE_WIDTH),
                     modified_cell(v, pending, colors),
-                    button(icon(PLAY, 15))
-                        .padding(8)
-                        .style(quiet)
-                        .on_press_maybe(playable.map(|f| Message::Play(f.id, id))),
                 ]
                 .spacing(LIST_COLUMN_SPACING)
                 .align_y(Alignment::Center);
@@ -634,6 +633,7 @@ impl App {
             content = content.push(motion::enter(
                 (
                     self.filter,
+                    &self.tag_filter,
                     &pane.search,
                     pane.sort,
                     pane.sort_order,
@@ -799,7 +799,14 @@ impl App {
     fn empty_state(&self, pending: bool) -> Element<'_, Message> {
         let colors = self.colors();
         let searching = !self.pane(pending).search.is_empty();
-        let (glyph, title, description) = if searching {
+        let filtering_tags = !pending && !self.tag_filter.is_empty();
+        let (glyph, title, description) = if filtering_tags {
+            (
+                TAG,
+                "没有符合条件的视频",
+                "当前分类和搜索结果中，没有同时包含所有所选标签的视频。",
+            )
+        } else if searching {
             (
                 SEARCH,
                 "没有找到匹配的视频",
@@ -833,11 +840,6 @@ impl App {
                     "所有文件均可访问",
                     "文件离线或无法访问时，你可以在这里查看。",
                 ),
-                Filter::Tag(_) => (
-                    TAG,
-                    "这个标签还没有视频",
-                    "在全部视频中选中条目，再添加这个标签。",
-                ),
             }
         };
         let mut empty = column![
@@ -858,6 +860,14 @@ impl App {
         ]
         .spacing(14)
         .align_x(Alignment::Center);
+        if filtering_tags {
+            empty = empty.push(
+                button(button_text("清除标签筛选").size(13))
+                    .style(secondary)
+                    .padding([10, 20])
+                    .on_press(Message::ClearTagFilter),
+            );
+        }
         if searching {
             empty = empty.push(
                 button(button_text("清除搜索").size(13))
@@ -865,7 +875,7 @@ impl App {
                     .padding([10, 20])
                     .on_press(Message::Search(pending, String::new())),
             );
-        } else if !pending && self.filter == Filter::All {
+        } else if !pending && !filtering_tags && self.filter == Filter::All {
             empty = empty
                 .push(
                     button(label(ADD, "导入第一个视频"))
@@ -878,13 +888,6 @@ impl App {
                         .size(11)
                         .color(colors.muted),
                 );
-        } else if !pending && matches!(self.filter, Filter::Tag(_)) {
-            empty = empty.push(
-                button(button_text("前往全部视频").size(13))
-                    .style(secondary)
-                    .padding([10, 20])
-                    .on_press(Message::Filter(Filter::All)),
-            );
         }
         container(empty)
             .padding(24)
@@ -944,10 +947,10 @@ impl App {
                         .style(quiet)
                         .padding(6)
                         .on_press(Message::ClearSelection(pending)),
-                    button(label(ADD, "新建标签"))
+                    button(label(TAG, "标签管理"))
                         .style(quiet)
                         .padding(6)
-                        .on_press(Message::NewTag(id)),
+                        .on_press(Message::ShowTagManagement),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
@@ -988,7 +991,7 @@ impl App {
             .and_then(|id| self.snapshot.videos.iter().find(|v| v.id == id));
         let header = row![
             heading("视频详情", 15).width(Fill),
-            button(icon(CLOSE, 12))
+            button(button_icon(CLOSE, 12))
                 .style(quiet)
                 .padding(8)
                 .on_press(Message::ToggleDetails(pending)),
@@ -1319,10 +1322,13 @@ impl App {
             .step(0.1)
             .on_release(Message::SeekRelease),
             row![
-                button(icon(if video.paused() { PLAY } else { '\u{E769}' }, 16))
-                    .padding(8)
-                    .style(secondary)
-                    .on_press(Message::Pause),
+                button(button_icon(
+                    if video.paused() { PLAY } else { '\u{E769}' },
+                    16
+                ))
+                .padding(8)
+                .style(secondary)
+                .on_press(Message::Pause),
                 text(format!(
                     "{} / {}",
                     time_label(self.position),
@@ -1331,11 +1337,11 @@ impl App {
                 .size(11)
                 .color(colors.muted),
                 space::horizontal(),
-                button(icon(if full { '\u{E73F}' } else { '\u{E740}' }, 15))
+                button(button_icon(if full { '\u{E73F}' } else { '\u{E740}' }, 15))
                     .padding(8)
                     .style(quiet)
                     .on_press(Message::Fullscreen(id)),
-                button(icon('\u{E71A}', 14))
+                button(button_icon('\u{E71A}', 14))
                     .padding(8)
                     .style(quiet)
                     .on_press(Message::Stop),
@@ -1343,7 +1349,7 @@ impl App {
             .spacing(6)
             .align_y(Alignment::Center),
             row![
-                button(icon(
+                button(button_icon(
                     if self.settings.muted {
                         '\u{E74F}'
                     } else {
@@ -1640,8 +1646,18 @@ impl App {
             ]
             .spacing(20)
             .into(),
-            Dialog::DeleteTag(_) => column![
+            Dialog::DeleteTag(id) => column![
                 heading("删除这个标签？", 22),
+                text(
+                    self.snapshot
+                        .tags
+                        .iter()
+                        .find(|tag| tag.id == *id)
+                        .map(|tag| tag.name.as_str())
+                        .unwrap_or("标签已不存在")
+                )
+                .size(16)
+                .wrapping(text::Wrapping::Glyph),
                 text("将从所有视频中移除此标签，其他标签和磁盘上的原文件会保留。").size(14),
                 widget::rule::horizontal(1).style(separator),
                 row![
@@ -1810,7 +1826,7 @@ impl App {
     }
 }
 
-fn badge<'a>(colors: Palette, value: String, accent: bool) -> Element<'a, Message> {
+pub(super) fn badge<'a>(colors: Palette, value: String, accent: bool) -> Element<'a, Message> {
     container(
         text(value)
             .size(11)

@@ -121,7 +121,7 @@ pub const TAG: char = '\u{E8EC}';
 pub const VIDEO: char = '\u{E714}';
 pub const PLAY: char = '\u{E768}';
 pub const LIBRARY: char = '\u{E8F1}';
-pub const INBOX: char = '\u{E896}';
+pub const OPEN_WINDOW: char = '\u{E8A7}';
 pub const COPY: char = '\u{E8C8}';
 pub const INFO: char = '\u{E946}';
 pub const SEARCH: char = '\u{E721}';
@@ -144,6 +144,8 @@ pub const DETAILS_MIN_WIDTH: f32 = 300.0;
 pub const DETAILS_MAX_WIDTH: f32 = 640.0;
 pub const DETAILS_RESIZE_WIDTH: f32 = 16.0;
 pub const LIBRARY_MIN_WIDTH: f32 = 480.0;
+pub const BUTTON_CONTENT_HEIGHT: f32 = 20.0;
+pub const HEADER_COMPACT_WIDTH: f32 = 960.0;
 
 pub fn theme(dark: bool) -> Theme {
     let p = Palette::new(dark);
@@ -176,15 +178,31 @@ pub fn heading<'a>(value: impl Into<String>, size: u32) -> iced::widget::Text<'a
 }
 
 pub fn label(glyph: char, value: &str) -> Element<'_, Message> {
-    row![icon(glyph, 16), text(value).size(13)]
-        .spacing(8)
-        .align_y(iced::Alignment::Center)
-        .into()
+    row![
+        button_icon(glyph, 16).width(16),
+        button_text(value).align_x(iced::alignment::Horizontal::Left)
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center)
+    .into()
 }
 
-pub fn button_text<'a>(value: impl iced::widget::text::IntoFragment<'a>) -> iced::widget::Text<'a> {
-    // Keep content-sized buttons compact and center captions in fixed-width buttons.
-    text(value).align_x(iced::alignment::Horizontal::Center)
+pub fn button_text<'a>(value: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
+    // Match icon line boxes even when a view uses a smaller caption size.
+    // Keep shrink-to-fit widths and centered captions in fixed-width buttons.
+    text(value)
+        .size(13)
+        .line_height(iced::Pixels(BUTTON_CONTENT_HEIGHT))
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Center)
+}
+
+pub fn button_icon<'a>(glyph: char, size: u32) -> iced::widget::Text<'a> {
+    icon(glyph, size)
+        .line_height(iced::Pixels(BUTTON_CONTENT_HEIGHT))
+        .width(BUTTON_CONTENT_HEIGHT)
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Center)
 }
 
 pub fn content_scrollbar() -> scrollable::Scrollbar {
@@ -369,5 +387,49 @@ pub fn menu(theme: &Theme) -> iced::widget::overlay::menu::Style {
             offset: iced::Vector::new(0.0, 4.0),
             blur_radius: 12.0,
         },
+    }
+}
+
+pub fn button_focus(
+    theme: &Theme,
+    status: button::Status,
+    focused: bool,
+    mut style: button::Style,
+) -> button::Style {
+    if focused && status == button::Status::Active {
+        let colors = palette(theme);
+        style.background = Some(
+            if style.background == Some(colors.accent.into()) {
+                colors.accent_hover
+            } else if style.background == Some(colors.tint.into()) {
+                Color {
+                    a: 1.0,
+                    ..colors.tint
+                }
+            } else {
+                colors.tint
+            }
+            .into(),
+        );
+    }
+    style
+}
+
+pub fn focus_surface(theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(palette(theme).tint.into()),
+        border: iced::border::rounded(8),
+        ..Default::default()
+    }
+}
+
+pub fn menu_surface(theme: &Theme) -> container::Style {
+    let style = menu(theme);
+    container::Style {
+        background: Some(style.background),
+        text_color: Some(style.text_color),
+        border: style.border,
+        shadow: style.shadow,
+        ..Default::default()
     }
 }

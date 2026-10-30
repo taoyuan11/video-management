@@ -16,12 +16,15 @@ use video_management::{
 mod backdrop;
 mod branding;
 mod covers;
+mod dropdown;
 pub(crate) mod fluent;
 mod listing;
 mod motion;
 mod playback;
 mod resize;
 mod settings;
+mod tag_filter;
+mod tag_management;
 mod tags;
 mod updates;
 mod views;
@@ -35,7 +38,12 @@ pub enum Filter {
     Untagged,
     Duplicates,
     Missing,
-    Tag(i64),
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainPage {
+    Library,
+    Tags,
+    Settings,
 }
 #[derive(Default)]
 struct Pane {
@@ -73,6 +81,8 @@ pub enum Message {
     WindowOpened(window::Id),
     BackdropReady(window::Id, bool, Result<(), String>),
     ShowSettings,
+    ShowTagManagement,
+    ShowLibrary,
     SettingFocus(usize),
     NavigationKey(window::Id, iced::keyboard::key::Named, bool),
     Concurrency(usize),
@@ -88,6 +98,10 @@ pub enum Message {
     Scan(bool),
     CancelScan,
     Search(bool, String),
+    TagFilterOpen(bool),
+    TagFilterCheck(i64, bool),
+    ClearTagFilter,
+    TagFilterKey(iced::keyboard::key::Named, bool),
     Sort(bool, Sort),
     Select(bool, i64),
     Check(bool, i64, bool),
@@ -144,6 +158,9 @@ pub struct App {
     service: Option<Service>,
     snapshot: Snapshot,
     filter: Filter,
+    tag_filter: BTreeSet<i64>,
+    tag_filter_open: bool,
+    tag_filter_focus: usize,
     main_pane: Pane,
     pending_pane: Pane,
     dialog: Option<(window::Id, Dialog)>,
@@ -170,7 +187,8 @@ pub struct App {
     app_settings: AppSettings,
     app_settings_loaded: bool,
     settings_saving: Option<AppSettings>,
-    settings_page: bool,
+    page: MainPage,
+    tag_management_focus: usize,
     setting_focus: usize,
     system_dark: bool,
     native_dark: Option<bool>,
@@ -208,6 +226,9 @@ impl App {
                 service,
                 snapshot: Snapshot::default(),
                 filter: Filter::All,
+                tag_filter: BTreeSet::new(),
+                tag_filter_open: false,
+                tag_filter_focus: 0,
                 main_pane: Pane::default(),
                 pending_pane: Pane::default(),
                 dialog: None,
@@ -234,7 +255,8 @@ impl App {
                 app_settings: AppSettings::default(),
                 app_settings_loaded: false,
                 settings_saving: None,
-                settings_page: false,
+                page: MainPage::Library,
+                tag_management_focus: 1,
                 setting_focus: 0,
                 system_dark: settings::system_dark().unwrap_or(false),
                 native_dark: None,
@@ -443,7 +465,9 @@ impl App {
                         Event::Snapshot(s) => {
                             self.library_loading = false;
                             self.snapshot = s;
-                            self.reconcile_tags();
+                            if self.reconcile_tags() {
+                                tasks.push(listing::scroll_to_top(false));
+                            }
                             let visible: BTreeSet<_> =
                                 self.snapshot.videos.iter().map(|v| v.id).collect();
                             self.main_pane.selected.retain(|id| visible.contains(id));
@@ -532,7 +556,9 @@ impl App {
                         Ok(mut video) => {
                             video.set_volume(self.settings.volume);
                             video.set_muted(self.settings.muted);
-                            video.set_paused(self.settings_page && self.player_window == self.main);
+                            video.set_paused(
+                                self.page != MainPage::Library && self.player_window == self.main,
+                            );
                             self.player = Some(video);
                         }
                         Err(e) => {
@@ -588,7 +614,8 @@ impl App {
             }
             Message::OpenPending => return self.open_pending(true),
             Message::Filter(f) => {
-                self.settings_page = false;
+                self.tag_filter_open = false;
+                self.page = MainPage::Library;
                 self.filter = f;
                 self.main_pane.selected.clear();
                 self.main_pane.tag_draft.clear();
@@ -670,6 +697,33 @@ impl App {
                 pane.toggle_sort(s);
                 return listing::scroll_to_top(p);
             }
+            Message::TagFilterOpen(open) => {
+                self.tag_filter_open = open;
+                if open {
+                    self.tag_filter_focus = 0;
+                    return widget::operation::focus("tag-filter");
+                }
+            }
+            Message::TagFilterCheck(id, on) => {
+                if let Some(index) = self.snapshot.tags.iter().position(|tag| tag.id == id) {
+                    self.tag_filter_focus = index;
+                    let changed = if on {
+                        self.tag_filter.insert(id)
+                    } else {
+                        self.tag_filter.remove(&id)
+                    };
+                    if changed {
+                        return self.reset_tag_filter_results();
+                    }
+                }
+            }
+            Message::ClearTagFilter => {
+                if !self.tag_filter.is_empty() {
+                    self.tag_filter.clear();
+                    return self.reset_tag_filter_results();
+                }
+            }
+            Message::TagFilterKey(key, reverse) => return self.tag_filter_key(key, reverse),
             Message::Select(p, id) => {
                 let owner = if p {
                     self.pending.unwrap_or(self.main)
@@ -801,11 +855,19 @@ impl App {
                 self.clear_tag_selection(p);
             }
             Message::NewTag(id) => {
+                self.tag_filter_open = false;
+                if id == self.main && self.page == MainPage::Tags {
+                    self.tag_management_focus = 1;
+                }
                 self.tag_name.clear();
                 self.dialog = Some((id, Dialog::Tag(None)));
                 return widget::operation::focus("tag-name");
             }
             Message::EditTag(id) => {
+                self.tag_filter_open = false;
+                if let Some(index) = self.snapshot.tags.iter().position(|tag| tag.id == id) {
+                    self.tag_management_focus = 2 + index * 2;
+                }
                 self.tag_name = self
                     .snapshot
                     .tags
@@ -816,7 +878,13 @@ impl App {
                 self.dialog = Some((self.main, Dialog::Tag(Some(id))));
                 return widget::operation::focus("tag-name");
             }
-            Message::DeleteTag(id) => self.dialog = Some((self.main, Dialog::DeleteTag(id))),
+            Message::DeleteTag(id) => {
+                self.tag_filter_open = false;
+                if let Some(index) = self.snapshot.tags.iter().position(|tag| tag.id == id) {
+                    self.tag_management_focus = 3 + index * 2;
+                }
+                self.dialog = Some((self.main, Dialog::DeleteTag(id)));
+            }
             Message::TagName(name) => self.tag_name = name,
             Message::SaveTag => {
                 if self.tag_name.trim().is_empty() || self.tag_name.trim().chars().count() > 80 {
@@ -833,9 +901,6 @@ impl App {
             Message::ConfirmDeleteTag => {
                 if let Some((_, Dialog::DeleteTag(id))) = self.dialog.take() {
                     self.send(Command::DeleteTag(id));
-                    if self.filter == Filter::Tag(id) {
-                        return self.update(Message::Filter(Filter::All));
-                    }
                 }
             }
             Message::Trash(p, id) => {
@@ -940,7 +1005,10 @@ impl App {
                 if matches!(&self.dialog, Some((owner, Dialog::Tags(_))) if *owner == id) {
                     return self.tag_picker_key(key, reverse);
                 }
-                if id == self.main && self.settings_page && self.dialog.is_none() {
+                if id == self.main && self.page == MainPage::Tags && self.dialog.is_none() {
+                    return self.tag_management_key(key, reverse);
+                }
+                if id == self.main && self.page == MainPage::Settings && self.dialog.is_none() {
                     self.settings_key(key);
                 } else if self.dialog.is_none() && key == iced::keyboard::key::Named::Tab {
                     return if reverse {
@@ -951,13 +1019,19 @@ impl App {
                 }
             }
             Message::ShowSettings => {
-                self.settings_page = true;
-                if self.player_window == self.main
-                    && let Some(player) = &mut self.player
-                {
-                    player.set_paused(true);
-                }
+                self.show_page(MainPage::Settings);
             }
+            Message::ShowTagManagement => {
+                self.show_page(MainPage::Tags);
+                self.tag_management_focus = usize::from(self.tag_management_enabled());
+                return Task::batch([
+                    window::gain_focus(self.main),
+                    iced::advanced::widget::operate(
+                        iced::advanced::widget::operation::focusable::unfocus(),
+                    ),
+                ]);
+            }
+            Message::ShowLibrary => self.show_page(MainPage::Library),
             Message::Concurrency(concurrency) => self.save_app_settings(AppSettings {
                 concurrency,
                 ..self.app_settings.clone()
@@ -1134,7 +1208,8 @@ impl App {
             Message::FocusSearch(id) => {
                 if self.dialog.is_none() {
                     if id == self.main {
-                        self.settings_page = false;
+                        self.tag_filter_open = false;
+                        self.page = MainPage::Library;
                     }
                     return widget::operation::focus(if Some(id) == self.pending {
                         "pending-search"
@@ -1168,8 +1243,8 @@ impl App {
                                     > 1
                             }
                             Filter::Missing => v.missing(),
-                            Filter::Tag(id) => v.tag_ids.contains(&id),
                         }
+                        && self.tag_filter.iter().all(|id| v.tag_ids.contains(id))
                 };
                 in_view
                     && (query.is_empty()

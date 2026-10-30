@@ -214,8 +214,7 @@ fn setting_style(
 ) -> iced::widget::pick_list::Style {
     let mut style = select(theme, status);
     if focused {
-        style.border.color = palette(theme).accent;
-        style.border.width = 2.0;
+        style.background = palette(theme).tint.into();
     }
     style
 }
@@ -255,13 +254,13 @@ mod tests {
         app.main_pane.page = 3;
         app.main_pane.selected.insert(7);
         let _ = app.update(Message::ShowSettings);
-        assert!(app.settings_page);
+        assert_eq!(app.page, MainPage::Settings);
         assert_eq!(app.main_pane.page, 3);
         assert!(app.main_pane.selected.contains(&7));
         app.settings_key(iced::keyboard::key::Named::Tab);
         assert_eq!(app.setting_focus, 1);
         let _ = app.update(Message::FocusSearch(app.main));
-        assert!(!app.settings_page);
+        assert_eq!(app.page, MainPage::Library);
         assert_eq!(app.main_pane.search, "保留搜索");
         app.app_settings.theme = ThemePreference::System;
         for dark in [true, false] {

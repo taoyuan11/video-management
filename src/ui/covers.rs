@@ -174,7 +174,7 @@ impl App {
         }
         let mut videos = Vec::new();
         for pending in [false, true] {
-            if (pending && self.pending.is_none()) || (!pending && self.settings_page) {
+            if (pending && self.pending.is_none()) || (!pending && self.page != MainPage::Library) {
                 continue;
             }
             if self.details_visible[usize::from(pending)]
@@ -187,7 +187,7 @@ impl App {
             }
         }
         for pending in [false, true] {
-            if (pending && self.pending.is_none()) || (!pending && self.settings_page) {
+            if (pending && self.pending.is_none()) || (!pending && self.page != MainPage::Library) {
                 continue;
             }
             let list = self.filtered(pending);
