@@ -50,8 +50,19 @@ path = "src/main.rs"
 required-features = ["gui"]
 
 [profile.release]
-lto = "thin"
-strip = "debuginfo"
+# Prefer smaller shipped binaries; full LTO trades release build time for size.
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+debug = 0
+incremental = false
+# Background processing and cover extraction recover with catch_unwind.
+panic = "unwind"
+
+[profile.release.package.sha2]
+# Full-file hashing is throughput-sensitive, even in a size-oriented release.
+opt-level = 3
 
 [[example]]
 name = "player_smoke"

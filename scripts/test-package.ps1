@@ -15,19 +15,22 @@ try {
     # Encoding helpers only run from the SDK to create disposable fixtures;
     # none of these encoders or test sources is needed in the portable package.
     $formats = [ordered]@{
-        'h264.mp4' = 'x264enc tune=zerolatency ! h264parse ! mux.video_0 audiotestsrc volume=0 num-buffers=141 ! audio/x-raw,rate=48000 ! avenc_aac ! aacparse ! mux.audio_0 mp4mux name=mux'
-        'hevc.mkv' = 'x265enc log-level=none ! h265parse ! matroskamux'
-        'vp8.webm' = 'vp8enc deadline=1 ! webmmux'
-        'vp9.webm' = 'vp9enc deadline=1 ! webmmux'
+        'h264.mp4' = 'x264enc tune=zerolatency key-int-max=30 ! h264parse ! mux.video_0 audiotestsrc volume=0 num-buffers=141 ! audio/x-raw,rate=48000 ! avenc_aac ! aacparse ! mux.audio_0 mp4mux name=mux'
+        'hevc.mkv' = 'x265enc log-level=none key-int-max=30 ! h265parse ! matroskamux'
+        'vp8.webm' = 'vp8enc deadline=1 keyframe-max-dist=30 ! webmmux'
+        'vp9.webm' = 'vp9enc deadline=1 keyframe-max-dist=30 ! webmmux'
         'mjpeg.avi' = 'jpegenc ! avimux'
-        'h264.flv' = 'x264enc tune=zerolatency ! h264parse ! flvmux'
-        'h264.ts' = 'x264enc tune=zerolatency ! h264parse ! mpegtsmux'
+        'h264.flv' = 'x264enc tune=zerolatency key-int-max=30 ! h264parse ! flvmux'
+        'h264.ts' = 'x264enc tune=zerolatency key-int-max=30 ! h264parse ! mpegtsmux'
         'mpeg2.mpg' = 'avenc_mpeg2video ! mpegvideoparse ! mpegpsmux'
         'wmv.wmv' = 'avenc_wmv2 ! asfmux'
     }
     foreach ($name in $formats.Keys) {
         $fixture = Join-Path $qa $name
-        $pipeline = "videotestsrc num-buffers=90 ! video/x-raw,format=I420,width=320,height=240,framerate=30/1 ! $($formats[$name]) ! filesink"
+        # MPEG-PS duration is estimated from stream timestamps/bitrate; leave
+        # headroom beyond the two-second seek used by the playback probe.
+        $frames = if ($name -eq 'mpeg2.mpg') { 180 } else { 90 }
+        $pipeline = "videotestsrc num-buffers=$frames ! video/x-raw,format=I420,width=320,height=240,framerate=30/1 ! $($formats[$name]) ! filesink"
         & (Join-Path $gstRoot 'bin/gst-launch-1.0.exe') -q @($pipeline.Split(' ')) ('location="' + $fixture.Replace('\', '/') + '"')
         if ($LASTEXITCODE -ne 0) { throw "Fixture generation failed: $name" }
         if (!(Test-Path -LiteralPath $fixture -PathType Leaf)) { throw "Missing generated fixture: $fixture" }
