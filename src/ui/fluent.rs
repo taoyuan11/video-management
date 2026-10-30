@@ -145,6 +145,7 @@ pub const DETAILS_MAX_WIDTH: f32 = 640.0;
 pub const DETAILS_RESIZE_WIDTH: f32 = 16.0;
 pub const LIBRARY_MIN_WIDTH: f32 = 480.0;
 pub const BUTTON_CONTENT_HEIGHT: f32 = 20.0;
+pub const TOOLBAR_CONTROL_PADDING: u16 = 10;
 pub const HEADER_COMPACT_WIDTH: f32 = 960.0;
 
 pub fn theme(dark: bool) -> Theme {

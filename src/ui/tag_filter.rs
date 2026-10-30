@@ -56,10 +56,11 @@ impl App {
         };
         let trigger = button(
             row![
-                text(caption).size(12),
-                icon(if open { '\u{E70E}' } else { '\u{E70D}' }, 10)
+                button_text(caption),
+                button_icon(if open { '\u{E70E}' } else { '\u{E70D}' }, 12).width(16),
             ]
             .spacing(8)
+            .height(BUTTON_CONTENT_HEIGHT)
             .align_y(Alignment::Center),
         )
         .style(move |theme, status| {
@@ -69,7 +70,7 @@ impl App {
                 secondary(theme, status)
             }
         })
-        .padding([10, 10])
+        .padding(TOOLBAR_CONTROL_PADDING)
         .on_press(Message::TagFilterOpen(!open));
         dropdown::tag_menu(trigger, open.then(|| self.tag_filter_menu()))
     }

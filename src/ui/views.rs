@@ -1,28 +1,22 @@
 use super::*;
 use iced::widget::column;
+use std::path::Path;
 
 fn modified_cell(video: &VideoItem, pending: bool, colors: Palette) -> Element<'_, Message> {
     let value: Element<_> =
         if let Some((date, time)) = listing::modified_label(listing::modified(video, pending)) {
-            column![text(date).size(11), text(time).size(11)]
+            row![text(date).size(11), text(time).size(11)]
                 .spacing(4)
                 .into()
         } else {
             text("未知").size(12).into()
         };
-    widget::tooltip(
-        container(value)
-            .width(LIST_MODIFIED_WIDTH)
-            .style(move |_| container::Style {
-                text_color: Some(colors.muted),
-                ..Default::default()
-            }),
-        "本地时间；多个副本取最新修改时间，离线文件显示上次记录",
-        widget::tooltip::Position::Top,
-    )
-    .style(panel)
-    .padding(8)
-    .into()
+    container(value)
+        .width(LIST_MODIFIED_WIDTH)
+        .style(move |_| container::Style {
+            text_color: Some(colors.muted),
+            ..Default::default()
+        }).into()
 }
 
 fn page_arrow(glyph: char, message: Option<Message>) -> Element<'static, Message> {
@@ -75,7 +69,7 @@ impl App {
                 widget::responsive(move |size| self.library(
                     pending,
                     id,
-                    size.width < LIST_COMPACT_WIDTH
+                    size.width < LIST_COMPACT_WIDTH,
                 )),
                 motion::details(
                     visible,
@@ -495,17 +489,17 @@ impl App {
             })
             .on_input(move |s| Message::Search(pending, s))
             .size(13)
-            .padding([9, 12])
+            .line_height(iced::Pixels(BUTTON_CONTENT_HEIGHT))
+            .padding([TOOLBAR_CONTROL_PADDING, 12])
             .style(input);
         let mut controls = row![search];
         if !pending {
             controls = controls.push(self.tag_filter_view());
         }
         let controls = controls
-            .push(self.sort_heading(pending, Sort::Recent, Length::Shrink))
             .push(
                 button(button_icon(INFO, 17))
-                    .padding(10)
+                    .padding(TOOLBAR_CONTROL_PADDING)
                     .style(move |theme, status| {
                         item(theme, self.details_visible[usize::from(pending)], status)
                     })
@@ -574,7 +568,7 @@ impl App {
                     format!("{tag}  ·  {}", extension(v))
                 };
                 let title = column![
-                    text(&v.title).size(14).wrapping(text::Wrapping::Glyph),
+                    list_title(&v.title),
                     text(meta)
                         .size(11)
                         .wrapping(text::Wrapping::Glyph)
@@ -588,7 +582,10 @@ impl App {
                 .width(Fill);
                 // Keep names readable at the supported minimum window width.
                 let name: Element<_> = if compact {
-                    column![self.cover_thumbnail(v), title].spacing(8).into()
+                    column![self.cover_thumbnail(v), title]
+                        .spacing(8)
+                        .width(Fill)
+                        .into()
                 } else {
                     row![self.cover_thumbnail(v), title]
                         .spacing(8)
@@ -1863,4 +1860,71 @@ fn extension(video: &VideoItem) -> String {
         .and_then(|file| file.path.extension())
         .map(|value| value.to_string_lossy().to_uppercase())
         .unwrap_or_else(|| "视频".into())
+}
+
+fn list_title<'a>(title: &'a str) -> Element<'a, Message> {
+    let title = title_without_extension(title);
+    widget::responsive(move |size| {
+        text(truncate_title(&title, size.width))
+            .size(14)
+            .wrapping(text::Wrapping::None)
+            .width(Fill)
+            .into()
+    })
+    .height(Length::Shrink)
+    .into()
+}
+
+fn title_without_extension(title: &str) -> String {
+    Path::new(title)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| title.to_owned())
+}
+
+fn truncate_title(title: &str, max_width: f32) -> String {
+    if title.is_empty() || title_width(title) <= max_width {
+        return title.to_owned();
+    }
+
+    let ellipsis = '…';
+    let available = (max_width - title_char_width(ellipsis)).max(0.0);
+    let mut width = 0.0;
+    let mut result = String::new();
+    for character in title.chars() {
+        let character_width = title_char_width(character);
+        if width + character_width > available {
+            break;
+        }
+        result.push(character);
+        width += character_width;
+    }
+    result.push(ellipsis);
+    result
+}
+
+fn title_width(title: &str) -> f32 {
+    title.chars().map(title_char_width).sum()
+}
+
+fn title_char_width(character: char) -> f32 {
+    if character.is_ascii() { 7.0 } else { 14.0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{title_without_extension, truncate_title};
+
+    #[test]
+    fn list_title_removes_only_the_final_extension() {
+        assert_eq!(title_without_extension("旅行记录.mp4"), "旅行记录");
+        assert_eq!(title_without_extension("片段.part.mkv"), "片段.part");
+        assert_eq!(title_without_extension("没有扩展名"), "没有扩展名");
+    }
+
+    #[test]
+    fn list_title_uses_a_single_line_ellipsis_when_it_does_not_fit() {
+        assert_eq!(truncate_title("短标题", 100.0), "短标题");
+        assert_eq!(truncate_title("这是一个很长的视频名称", 70.0), "这是一个…");
+    }
 }
