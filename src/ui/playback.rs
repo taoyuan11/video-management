@@ -132,12 +132,191 @@ mod tests {
     use crate::ui::{App, Message};
     use gstreamer::{self as gst, prelude::*};
     use std::sync::mpsc;
+    use video_management::model::{Availability, FileState, VideoFile, VideoItem};
 
     fn wait_for(mut condition: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(3);
         while !condition() {
             assert!(Instant::now() < deadline, "playback did not settle");
             thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn selection_app() -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, _) = App::boot(dir.path().into(), None, None);
+        if let Some(mut service) = app.service.take() {
+            service.shutdown();
+        }
+        app.pending = Some(iced::window::Id::unique());
+        app.snapshot.videos = (1..=3)
+            .map(|id| VideoItem {
+                id,
+                hash: format!("video-{id}"),
+                title: format!("视频 {id}"),
+                tag_ids: vec![],
+                library: true,
+                created_at: id,
+                duration_ms: None,
+                files: [FileState::Ignored, FileState::Managed, FileState::Pending]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, state)| VideoFile {
+                        id: id * 10 + index as i64,
+                        video_id: id,
+                        path: dir.path().join("sample.mp4"),
+                        size: 0,
+                        modified: 0,
+                        state,
+                        availability: Availability::Present,
+                    })
+                    .collect(),
+            })
+            .collect();
+        (dir, app)
+    }
+
+    fn write_selection_video(path: &std::path::Path) {
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(
+            "videotestsrc num-buffers=120 ! video/x-raw,width=160,height=90,framerate=30/1 ! videoconvert ! x264enc tune=zerolatency threads=2 ! h264parse ! mp4mux ! filesink name=output",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        pipeline
+            .by_name("output")
+            .unwrap()
+            .set_property("location", path.to_str().unwrap());
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let message = pipeline.bus().unwrap().timed_pop_filtered(
+            gst::ClockTime::from_seconds(10),
+            &[gst::MessageType::Eos, gst::MessageType::Error],
+        );
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert!(matches!(
+            message.as_ref().map(|m| m.view()),
+            Some(gst::MessageView::Eos(_))
+        ));
+    }
+
+    fn wait_until_playing(app: &mut App) {
+        wait_for(|| {
+            let _ = app.update(Message::Tick);
+            app.player.as_ref().is_some_and(|video| {
+                !video.paused() && video.position() > Duration::from_millis(50)
+            })
+        });
+        assert!(app.error.is_none(), "{:?}", app.error);
+    }
+
+    #[test]
+    fn selecting_another_row_replaces_playing_or_paused_video_in_either_window() {
+        let (dir, mut app) = selection_app();
+        write_selection_video(&dir.path().join("sample.mp4"));
+        for pending in [false, true] {
+            let owner = if pending {
+                app.pending.unwrap()
+            } else {
+                app.main
+            };
+            let file_offset = if pending { 2 } else { 1 };
+            for paused in [false, true] {
+                let _ = app.update(Message::Play(10 + file_offset, owner));
+                wait_until_playing(&mut app);
+                app.player.as_mut().unwrap().set_paused(paused);
+                let previous = app.player.as_ref().unwrap().pipeline();
+                app.position = 1.25;
+                app.pane_mut(pending).focus = None;
+
+                // Re-selecting the current video must preserve its player and
+                // pause state, even if another command cleared the detail focus.
+                let _ = app.update(Message::Select(pending, 1));
+                assert_eq!(app.player.as_ref().unwrap().pipeline(), previous);
+                assert_eq!(app.player.as_ref().unwrap().paused(), paused);
+                assert_eq!(app.position, 1.25);
+                let _ = app.update(Message::Check(pending, 2, true));
+                assert_eq!(app.pane(pending).focus, Some(1));
+                assert_eq!(app.playing_file, Some(10 + file_offset));
+
+                let _ = app.update(Message::Select(pending, 2));
+                assert_eq!(app.pane(pending).focus, Some(2));
+                assert_eq!(app.player_window, owner);
+                assert_eq!(app.playing_file, Some(20 + file_offset));
+                assert!(app.player.is_none());
+                assert!(app.loader.is_some());
+                assert_eq!(app.position, 0.0);
+                wait_for(|| previous.current_state() == gst::State::Null);
+                wait_until_playing(&mut app);
+                app.stop_player();
+                wait_for(|| app.playback_jobs.is_idle());
+            }
+        }
+    }
+
+    #[test]
+    fn rapid_row_changes_cancel_old_loads_and_play_only_the_latest_selection() {
+        let (dir, mut app) = selection_app();
+        write_selection_video(&dir.path().join("sample.mp4"));
+        let (release, resume) = mpsc::channel::<()>();
+        let load = Load::spawn(move |_| {
+            let _ = resume.recv();
+            Err("obsolete load failure".into())
+        })
+        .unwrap();
+        let token = load.cancel.clone();
+        app.loader = Some(load);
+        app.playing_file = Some(11);
+
+        let started = Instant::now();
+        let _ = app.update(Message::Select(false, 2));
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(token.load(Ordering::Acquire));
+        let second_token = app.loader.as_ref().unwrap().cancel.clone();
+        // Switching windows must choose that window's available copy too.
+        let _ = app.update(Message::Select(true, 3));
+        assert!(second_token.load(Ordering::Acquire));
+        assert_eq!(app.playing_file, Some(32));
+        assert_eq!(app.player_window, app.pending.unwrap());
+        drop(release);
+        wait_until_playing(&mut app);
+        assert_eq!(app.playing_file, Some(32));
+        app.stop_player();
+        wait_for(|| app.playback_jobs.is_idle());
+    }
+
+    #[test]
+    fn idle_rows_show_details_and_missing_rows_cancel_previous_playback() {
+        for pending in [false, true] {
+            let (_dir, mut app) = selection_app();
+            app.details_visible[usize::from(pending)] = false;
+            let _ = app.update(Message::Select(pending, 1));
+            assert_eq!(app.pane(pending).focus, Some(1));
+            assert!(app.details_visible[usize::from(pending)]);
+            assert!(app.player.is_none());
+            assert!(app.loader.is_none());
+
+            let (release, resume) = mpsc::channel::<()>();
+            let load = Load::spawn(move |_| {
+                let _ = resume.recv();
+                Err("obsolete load failure".into())
+            })
+            .unwrap();
+            let token = load.cancel.clone();
+            app.loader = Some(load);
+            app.playing_file = Some(if pending { 12 } else { 11 });
+            for file in &mut app.snapshot.videos[1].files {
+                file.availability = Availability::Missing;
+            }
+            let _ = app.update(Message::Select(pending, 2));
+            assert_eq!(app.pane(pending).focus, Some(2));
+            assert!(token.load(Ordering::Acquire));
+            assert!(app.playing_file.is_none());
+            assert!(app.loader.is_none());
+            drop(release);
+            wait_for(|| app.playback_jobs.is_idle());
+            let _ = app.update(Message::Tick);
+            assert!(app.error.is_none());
         }
     }
 

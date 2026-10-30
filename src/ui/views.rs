@@ -596,11 +596,7 @@ impl App {
                     checkbox(pane.selected.contains(&v.id))
                         .size(18)
                         .on_toggle(move |on| Message::Check(pending, video_id, on)),
-                    button(name)
-                        .width(Fill)
-                        .padding([10, 0])
-                        .style(quiet)
-                        .on_press(Message::Select(pending, v.id)),
+                    container(name).width(Fill).padding([10, 0]),
                     text(listing::duration_label(v.duration_ms))
                         .size(12)
                         .color(colors.muted)
@@ -618,16 +614,22 @@ impl App {
                 ]
                 .spacing(LIST_COLUMN_SPACING)
                 .align_y(Alignment::Center);
-                list =
-                    list.push(
-                        container(entry)
+                list = list.push(
+                    // Child controls consume their own clicks; all remaining
+                    // row content and padding select the video.
+                    container(
+                        button(entry)
+                            .width(Fill)
                             .padding([2, 12])
-                            .style(move |_| container::Style {
-                                background: active.then_some(colors.tint.into()),
-                                border: iced::border::rounded(8),
-                                ..Default::default()
-                            }),
-                    );
+                            .style(quiet)
+                            .on_press(Message::Select(pending, v.id)),
+                    )
+                    .style(move |_| container::Style {
+                        background: active.then_some(colors.tint.into()),
+                        border: iced::border::rounded(8),
+                        ..Default::default()
+                    }),
+                );
             }
             content = content.push(motion::enter(
                 (

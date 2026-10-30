@@ -671,11 +671,44 @@ impl App {
                 return listing::scroll_to_top(p);
             }
             Message::Select(p, id) => {
+                let owner = if p {
+                    self.pending.unwrap_or(self.main)
+                } else {
+                    self.main
+                };
+                let video = self.snapshot.videos.iter().find(|v| v.id == id);
+                // Compare the playing video, not the detail focus: filtering
+                // and clearing selection can remove focus while playback stays.
+                let switch_playback = (self.player.is_some() || self.loader.is_some())
+                    && (self.player_window != owner
+                        || !video.is_some_and(|v| {
+                            v.files.iter().any(|f| Some(f.id) == self.playing_file)
+                        }));
+                let playable = video.and_then(|v| {
+                    v.files
+                        .iter()
+                        .find(|f| {
+                            f.availability == Availability::Present
+                                && f.state
+                                    == if p {
+                                        FileState::Pending
+                                    } else {
+                                        FileState::Managed
+                                    }
+                        })
+                        .map(|f| f.id)
+                });
                 if self.pane(p).selected.is_empty() && self.pane(p).focus != Some(id) {
                     self.pane_mut(p).tag_draft.clear();
                 }
                 self.pane_mut(p).focus = Some(id);
                 self.details_visible[usize::from(p)] = true;
+                if switch_playback {
+                    self.stop_player();
+                    if let Some(file) = playable {
+                        return self.update(Message::Play(file, owner));
+                    }
+                }
             }
             Message::Check(p, id, on) => {
                 let pane = self.pane_mut(p);
