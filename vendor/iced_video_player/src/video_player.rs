@@ -1,11 +1,9 @@
 use crate::{pipeline::VideoPrimitive, video::Video};
-use gstreamer as gst;
 use iced::{
     Element,
     advanced::{self, Widget, layout, widget},
 };
 use iced_wgpu::primitive::Renderer as PrimitiveRenderer;
-use log::error;
 use std::{marker::PhantomData, sync::atomic::Ordering, time::Duration};
 use std::{sync::Arc, time::Instant};
 
@@ -157,6 +155,11 @@ where
         _viewport: &iced::Rectangle,
     ) {
         let mut inner = self.video.write();
+        {
+            let frame = inner.frame.lock().unwrap().clone();
+            inner.width = frame.width as i32;
+            inner.height = frame.height as i32;
+        }
 
         // bounds based on `Image::draw`
         let image_size = iced::Size::new(inner.width as f32, inner.height as f32);
@@ -199,7 +202,6 @@ where
                     inner.id,
                     Arc::clone(&inner.alive),
                     Arc::clone(&inner.frame),
-                    (inner.width as _, inner.height as _),
                     upload_frame,
                 ),
             );
@@ -223,76 +225,38 @@ where
         shell: &mut advanced::Shell<'_, Message>,
         _viewport: &iced::Rectangle,
     ) {
-        let mut inner = self.video.write();
-
         if let iced::Event::Window(iced::window::Event::RedrawRequested(_)) = event {
-            if inner.restart_stream || (!inner.is_eos && !inner.paused()) {
-                let mut restart_stream = false;
-                let emit_eos = !inner.restart_stream;
-                if inner.restart_stream {
-                    restart_stream = true;
-                    // Set flag to false to avoid potentially multiple seeks
-                    inner.restart_stream = false;
+            let mut inner = self.video.write();
+            if let Some(on_error) = &self.on_error {
+                if let Some(error) = inner.control.take_error() {
+                    shell.publish(on_error(&error));
                 }
-                let mut eos_pause = false;
-
-                while let Some(msg) = inner
-                    .bus
-                    .pop_filtered(&[gst::MessageType::Error, gst::MessageType::Eos])
-                {
-                    match msg.view() {
-                        gst::MessageView::Error(err) => {
-                            error!("bus returned an error: {err}");
-                            if let Some(ref on_error) = self.on_error {
-                                shell.publish(on_error(&err.error()))
-                            };
-                        }
-                        gst::MessageView::Eos(_eos) => {
-                            if emit_eos
-                                && let Some(on_end_of_stream) = self.on_end_of_stream.clone()
-                            {
-                                shell.publish(on_end_of_stream);
-                            }
-                            if inner.looping {
-                                restart_stream = true;
-                            } else {
-                                eos_pause = true;
-                            }
-                        }
-                        _ => {}
-                    }
+            }
+            if inner.control.eos_event.swap(false, Ordering::AcqRel) {
+                if let Some(on_end) = self.on_end_of_stream.clone() {
+                    shell.publish(on_end);
                 }
-
-                // Don't run eos_pause if restart_stream is true; fixes "pausing" after restarting a stream
-                if restart_stream {
-                    if let Err(err) = inner.restart_stream() {
-                        error!("cannot restart stream (can't seek): {err:#?}");
-                    }
-                } else if eos_pause {
-                    inner.is_eos = true;
+                if inner.looping {
+                    let _ = inner.restart_stream();
+                } else {
                     inner.set_paused(true);
                 }
-
-                if inner.upload_frame.load(Ordering::SeqCst) {
-                    if let Some(on_new_frame) = self.on_new_frame.clone() {
-                        shell.publish(on_new_frame);
-                    }
-                }
-
-                if let Some(on_subtitle_text) = &self.on_subtitle_text {
-                    if inner.upload_text.swap(false, Ordering::SeqCst) {
-                        if let Ok(text) = inner.subtitle_text.try_lock() {
-                            shell.publish(on_subtitle_text(text.clone()));
-                        }
-                    }
-                }
-
-                shell.request_redraw();
-            } else {
-                shell.request_redraw_at(iced::window::RedrawRequest::At(
-                    Instant::now() + Duration::from_millis(32),
-                ));
             }
+            if inner.upload_frame.load(Ordering::Acquire) {
+                if let Some(on_frame) = self.on_new_frame.clone() {
+                    shell.publish(on_frame);
+                }
+            }
+            if let Some(on_text) = &self.on_subtitle_text {
+                if inner.upload_text.swap(false, Ordering::AcqRel) {
+                    if let Ok(text) = inner.subtitle_text.try_lock() {
+                        shell.publish(on_text(text.clone()));
+                    }
+                }
+            }
+            shell.request_redraw_at(iced::window::RedrawRequest::At(
+                Instant::now() + Duration::from_millis(if inner.paused() { 32 } else { 16 }),
+            ));
         }
     }
 }

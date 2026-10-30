@@ -7,12 +7,7 @@ use iced::{
     window,
 };
 use iced_video_player::{Video, VideoPlayer};
-use std::{
-    collections::BTreeSet,
-    path::PathBuf,
-    thread::{self, JoinHandle},
-    time::Duration,
-};
+use std::{collections::BTreeSet, path::PathBuf, time::Duration};
 use video_management::{
     model::*,
     scanner::VIDEO_EXTENSIONS,
@@ -24,6 +19,7 @@ mod covers;
 pub(crate) mod fluent;
 mod listing;
 mod motion;
+mod playback;
 mod resize;
 mod settings;
 mod tags;
@@ -132,10 +128,9 @@ pub enum Message {
     Mute,
     Fullscreen(window::Id),
     Frame,
-    End,
-    PlayerError(String),
     Stop,
     Copy(String),
+    OpenInExplorer(PathBuf),
     ClearError,
     ClearUpdateNotice,
     ToggleDetails(bool),
@@ -161,7 +156,9 @@ pub struct App {
     data: PathBuf,
     covers: covers::Covers,
     player: Option<Video>,
-    loader: Option<JoinHandle<Result<Video, String>>>,
+    loader: Option<playback::Load>,
+    playback_jobs: playback::Jobs,
+    pending_trash: Option<(Vec<DeleteTarget>, std::time::Instant)>,
     playing_file: Option<i64>,
     player_window: window::Id,
     player_title: String,
@@ -224,6 +221,8 @@ impl App {
                 covers: covers::Covers::default(),
                 player: None,
                 loader: None,
+                playback_jobs: playback::Jobs::default(),
+                pending_trash: None,
                 playing_file: None,
                 player_window: main,
                 player_title: String::new(),
@@ -363,13 +362,12 @@ impl App {
         task.map(Message::WindowOpened)
     }
     fn stop_player(&mut self) {
-        self.player.take();
-        if let Some(loader) = self.loader.take() {
-            let _ = loader.join();
-        }
+        self.playback_jobs
+            .stop(self.player.take(), self.loader.take());
         self.playing_file = None;
         self.position = 0.0;
         self.dragging = false;
+        self.resume_after_seek = false;
     }
     pub fn update(&mut self, message: Message) -> Task<Message> {
         if self.updates.phase == updates::Phase::Stopping && !matches!(message, Message::Tick) {
@@ -512,27 +510,46 @@ impl App {
                         }
                     }
                 }
+                self.playback_jobs.reap();
+                if let Some((targets, started)) = self.pending_trash.take() {
+                    if self.playback_jobs.is_idle() {
+                        self.send(Command::Trash(targets));
+                    } else if started.elapsed() >= Duration::from_secs(10) {
+                        self.error =
+                            Some("播放组件尚未释放文件，未移入回收站，请稍后重试。".into());
+                    } else {
+                        self.pending_trash = Some((targets, started));
+                    }
+                }
+                if self.loader.as_ref().is_some_and(|l| l.expired()) {
+                    self.stop_player();
+                    self.error = Some("视频加载超时，请检查文件或网络连接后重试。".into());
+                }
                 if self.loader.as_ref().is_some_and(|l| l.is_finished())
                     && let Some(loader) = self.loader.take()
                 {
-                    match loader.join() {
-                        Ok(Ok(mut video)) => {
+                    match loader.finish() {
+                        Ok(mut video) => {
                             video.set_volume(self.settings.volume);
                             video.set_muted(self.settings.muted);
-                            if self.settings_page && self.player_window == self.main {
-                                video.set_paused(true);
-                            }
+                            video.set_paused(self.settings_page && self.player_window == self.main);
                             self.player = Some(video);
                         }
-                        Ok(Err(e)) => {
+                        Err(e) => {
                             self.error = Some(e);
                             self.playing_file = None;
                         }
-                        Err(_) => {
-                            self.error = Some("播放组件未能加载此文件".into());
-                            self.playing_file = None;
-                        }
                     }
+                }
+                if let Some(error) = self.player.as_ref().and_then(Video::take_error) {
+                    self.error = Some(format!("播放出错：{error}"));
+                    self.stop_player();
+                }
+                if let Some(video) = &mut self.player
+                    && video.eos()
+                    && !video.paused()
+                {
+                    video.set_paused(true);
                 }
                 if !self.dragging
                     && let Some(v) = &self.player
@@ -848,6 +865,10 @@ impl App {
                 }
             }
             Message::ConfirmTrash => {
+                if self.pending_trash.is_some() {
+                    self.error = Some("正在等待播放器释放文件，请稍后重试。".into());
+                    return Task::none();
+                }
                 if let Some((
                     _,
                     Dialog::Trash {
@@ -858,12 +879,17 @@ impl App {
                     if self.playing_file.is_some_and(|id| selected.contains(&id)) {
                         self.stop_player();
                     }
-                    self.send(Command::Trash(
-                        targets
-                            .into_iter()
-                            .filter(|t| selected.contains(&t.file_id))
-                            .collect(),
-                    ));
+                    let targets: Vec<_> = targets
+                        .into_iter()
+                        .filter(|t| selected.contains(&t.file_id))
+                        .collect();
+                    // Asynchronous stop may still own file handles. Preserve
+                    // the confirmed targets, but never wait in the event loop.
+                    if self.playback_jobs.is_idle() {
+                        self.send(Command::Trash(targets));
+                    } else {
+                        self.pending_trash = Some((targets, std::time::Instant::now()));
+                    }
                 }
             }
             Message::Dismiss => {
@@ -938,7 +964,12 @@ impl App {
             Message::ShowRoots => self.dialog = Some((self.main, Dialog::Roots)),
             Message::RemoveRoot(p) => self.send(Command::RemoveRoot(p)),
             Message::Play(id, owner) => {
-                if self.loader.is_some() {
+                if self
+                    .pending_trash
+                    .as_ref()
+                    .is_some_and(|(targets, _)| targets.iter().any(|t| t.file_id == id))
+                {
+                    self.error = Some("此文件正在移入回收站，请稍候。".into());
                     return Task::none();
                 }
                 let info = self.snapshot.videos.iter().find_map(|v| {
@@ -954,28 +985,27 @@ impl App {
                         self.fullscreen = false;
                     }
                     self.stop_player();
+                    if !self.playback_jobs.can_start() {
+                        self.error = Some(
+                            "播放组件仍在释放资源，请稍后重试；若持续无法恢复，请重启程序。".into(),
+                        );
+                        if let Some(previous) = previous_fullscreen {
+                            return window::set_mode(previous, window::Mode::Windowed);
+                        }
+                        return Task::none();
+                    }
                     self.pane_mut(Some(owner) == self.pending).focus = Some(video_id);
                     self.details_visible[usize::from(Some(owner) == self.pending)] = true;
                     self.playing_file = Some(id);
                     self.player_title = title;
                     self.player_window = owner;
-                    self.loader = thread::Builder::new()
-                        .name("video-load".into())
-                        .spawn(move || {
-                            if !path.is_file() {
-                                return Err(format!("文件不可访问：{}", path.display()));
-                            }
-                            let uri = video_management::media::file_uri(&path)
-                                .map_err(|e| format!("{e:#}"))?;
-                            Video::new(&uri).map_err(|e| {
-                                format!(
-                                    "无法播放 {}：{e}。请确认文件完整且编码受支持。",
-                                    path.display()
-                                )
-                            })
-                        })
-                        .map_err(|e| self.error = Some(e.to_string()))
-                        .ok();
+                    match playback::Load::start(path) {
+                        Ok(load) => self.loader = Some(load),
+                        Err(error) => {
+                            self.playing_file = None;
+                            self.error = Some(format!("无法启动播放组件：{error}"));
+                        }
+                    }
                     if let Some(previous) = previous_fullscreen {
                         return window::set_mode(previous, window::Mode::Windowed);
                     }
@@ -1048,16 +1078,8 @@ impl App {
                 self.stop_player();
             }
             Message::Frame => {}
-            Message::End => {
-                if let Some(v) = &mut self.player {
-                    v.set_paused(true);
-                }
-            }
-            Message::PlayerError(e) => {
-                self.error = Some(format!("播放出错：{e}"));
-                self.stop_player();
-            }
             Message::Copy(v) => return iced::clipboard::write(v),
+            Message::OpenInExplorer(path) => self.send(Command::OpenInExplorer(path)),
             Message::ClearError => self.error = None,
             Message::ClearUpdateNotice => self.update_notice = None,
             Message::ToggleDetails(p) => {

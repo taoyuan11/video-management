@@ -122,6 +122,7 @@ fn verbatim_long_path_supports_playback_and_cover_extraction() {
     let uri = video_management::media::file_uri(&path).unwrap();
     let video = iced_video_player::Video::new(&uri).unwrap();
     assert_eq!(video.size(), (320, 180));
+    assert!(video.shutdown(Duration::from_secs(3)));
     drop(video);
     exclusive(&path);
 

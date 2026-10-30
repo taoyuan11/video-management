@@ -34,6 +34,7 @@
 //!
 //! You can programmatically control the video (e.g., seek, pause, loop, grab thumbnails) by accessing various methods on [`Video`].
 
+mod control;
 mod pipeline;
 mod video;
 mod video_player;
@@ -73,4 +74,8 @@ pub enum Error {
     Lock,
     #[error("invalid framerate: {0}")]
     Framerate(f64),
+    #[error("视频加载超时，请检查文件或网络连接后重试")]
+    Timeout,
+    #[error("视频加载已取消")]
+    Cancelled,
 }

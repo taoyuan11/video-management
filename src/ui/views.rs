@@ -600,11 +600,7 @@ impl App {
                     button(icon(PLAY, 15))
                         .padding(8)
                         .style(quiet)
-                        .on_press_maybe(
-                            playable
-                                .filter(|_| self.loader.is_none())
-                                .map(|f| Message::Play(f.id, id))
-                        ),
+                        .on_press_maybe(playable.map(|f| Message::Play(f.id, id))),
                 ]
                 .spacing(LIST_COLUMN_SPACING)
                 .align_y(Alignment::Center);
@@ -1041,9 +1037,8 @@ impl App {
                                     .style(quiet)
                                     .padding(6)
                                     .on_press_maybe(
-                                        (file.availability == Availability::Present
-                                            && self.loader.is_none())
-                                        .then_some(Message::Play(file.id, id))
+                                        (file.availability == Availability::Present)
+                                            .then_some(Message::Play(file.id, id))
                                     ),
                                 space::horizontal(),
                                 button(label(COPY, "复制路径"))
@@ -1054,6 +1049,13 @@ impl App {
                                     ))
                             ]
                             .align_y(Alignment::Center),
+                            button(label(FOLDER, "在资源管理器中打开"))
+                                .style(quiet)
+                                .padding(6)
+                                .on_press_maybe(
+                                    (file.availability == Availability::Present)
+                                        .then(|| Message::OpenInExplorer(file.path.clone()))
+                                ),
                         ]
                         .spacing(10),
                     )
@@ -1172,11 +1174,7 @@ impl App {
         let play = button(label(PLAY, "播放"))
             .style(primary)
             .padding([8, 12])
-            .on_press_maybe(
-                playable
-                    .filter(|_| self.loader.is_none())
-                    .map(|f| Message::Play(f.id, id)),
-            );
+            .on_press_maybe(playable.map(|f| Message::Play(f.id, id)));
         let content: Element<_> = match self.covers.state(&video.hash) {
             Some(covers::State::Ready(handle)) => stack![
                 widget::image(handle.clone())
@@ -1284,9 +1282,7 @@ impl App {
             .width(Fill)
             .height(if full { Fill } else { Length::Fixed(170.0) })
             .content_fit(iced::ContentFit::Contain)
-            .on_new_frame(Message::Frame)
-            .on_end_of_stream(Message::End)
-            .on_error(|error| Message::PlayerError(error.to_string()));
+            .on_new_frame(Message::Frame);
         column![
             container(display)
                 .width(Fill)

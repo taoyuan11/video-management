@@ -172,6 +172,21 @@ impl VideoPipeline {
     ) {
         // Use stride from GStreamer's VideoMeta if available, otherwise assume stride == width
         let stride = stride.unwrap_or(width);
+        let limit = device.limits().max_texture_dimension_2d;
+        if width == 0
+            || height == 0
+            || width > limit
+            || height > limit
+            || stride < width.next_multiple_of(2)
+            || frame.len() < stride as usize * (height + height.div_ceil(2)) as usize
+        {
+            return;
+        }
+        if self.videos.get(&video_id).is_some_and(|entry| {
+            entry.texture_y.width() != width || entry.texture_y.height() != height
+        }) {
+            self.videos.remove(&video_id);
+        }
         if let Entry::Vacant(entry) = self.videos.entry(video_id) {
             let texture_y = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("iced_video_player texture"),
@@ -191,8 +206,8 @@ impl VideoPipeline {
             let texture_uv = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("iced_video_player texture"),
                 size: wgpu::Extent3d {
-                    width: width / 2,
-                    height: height / 2,
+                    width: width.div_ceil(2),
+                    height: height.div_ceil(2),
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -310,11 +325,11 @@ impl VideoPipeline {
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(stride),
-                rows_per_image: Some(height / 2),
+                rows_per_image: Some(height.div_ceil(2)),
             },
             wgpu::Extent3d {
-                width: width / 2,
-                height: height / 2,
+                width: width.div_ceil(2),
+                height: height.div_ceil(2),
                 depth_or_array_layers: 1,
             },
         );
@@ -394,7 +409,6 @@ pub(crate) struct VideoPrimitive {
     video_id: u64,
     alive: Arc<AtomicBool>,
     frame: Arc<Mutex<Frame>>,
-    size: (u32, u32),
     upload_frame: bool,
 }
 
@@ -403,14 +417,12 @@ impl VideoPrimitive {
         video_id: u64,
         alive: Arc<AtomicBool>,
         frame: Arc<Mutex<Frame>>,
-        size: (u32, u32),
         upload_frame: bool,
     ) -> Self {
         VideoPrimitive {
             video_id,
             alive,
             frame,
-            size,
             upload_frame,
         }
     }
@@ -428,17 +440,19 @@ impl Primitive for VideoPrimitive {
         viewport: &iced_wgpu::graphics::Viewport,
     ) {
         if self.upload_frame {
-            let frame_guard = self.frame.lock().expect("lock frame mutex");
-            let stride = frame_guard.stride();
-            if let Some(readable) = frame_guard.readable() {
+            // Clone only an Arc while holding the frame mutex. GPU uploads and
+            // memory mapping must never block the decoding thread under it.
+            if let Ok(frame_guard) = self.frame.lock() {
+                let frame = frame_guard.clone();
+                drop(frame_guard);
                 pipeline.upload(
                     device,
                     queue,
                     self.video_id,
                     &self.alive,
-                    self.size,
-                    readable.as_slice(),
-                    stride,
+                    (frame.width, frame.height),
+                    &frame.bytes,
+                    Some(frame.width.next_multiple_of(2)),
                 );
             };
         }

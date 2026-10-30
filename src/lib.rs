@@ -2,6 +2,7 @@
 compile_error!("video-management supports Windows 11 x64 only.");
 
 pub mod database;
+mod explorer;
 #[cfg(feature = "gui")]
 pub mod media;
 pub mod model;

@@ -87,6 +87,10 @@ fn main() -> anyhow::Result<()> {
         video.size().1,
         video.duration()
     );
+    assert!(
+        video.shutdown(Duration::from_secs(3)),
+        "player teardown timed out"
+    );
     drop(video);
     let pool = video_management::processing::Pool::new(
         2.min(video_management::model::AppSettings::max_concurrency()),

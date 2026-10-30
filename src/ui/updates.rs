@@ -4,6 +4,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::thread::{self, JoinHandle};
 use video_management::update::{self, Candidate, CheckResult, Handoff};
 
 #[derive(Default, PartialEq, Eq)]

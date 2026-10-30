@@ -32,6 +32,7 @@ pub enum Command {
     Assign(Vec<i64>, TagAssignment, bool),
     Forget(Vec<i64>, bool),
     Trash(Vec<DeleteTarget>),
+    OpenInExplorer(PathBuf),
     Settings(Settings),
     AppSettings(AppSettings),
     UpdateSettings(UpdateSettings),
@@ -343,6 +344,7 @@ fn run(
                             }
                             let _ = events.send(Event::Status("回收站操作完成".into()));
                         }
+                        Command::OpenInExplorer(path) => crate::explorer::open(&path)?,
                         Command::Settings(settings) => {
                             let saved = db.save_settings(&settings);
                             settings_error = saved.as_ref().err().map(|e| format!("{e:#}"));
