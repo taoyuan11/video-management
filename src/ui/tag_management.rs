@@ -214,6 +214,7 @@ mod tests {
         app.pending = Some(window::Id::unique());
         app.filter = Filter::Missing;
         app.tag_filter.extend([1, 2]);
+        app.excluded_tag_filter.extend([3, 4]);
         app.tag_filter_open = true;
         app.main_pane.search = "保留搜索".into();
         app.main_pane.page = 3;
@@ -231,6 +232,7 @@ mod tests {
         assert_eq!(app.page, MainPage::Library);
         assert_eq!(app.filter, Filter::Missing);
         assert_eq!(app.tag_filter, BTreeSet::from([1, 2]));
+        assert_eq!(app.excluded_tag_filter, BTreeSet::from([3, 4]));
         assert_eq!(app.main_pane.search, "保留搜索");
         assert_eq!(app.main_pane.page, 3);
         assert_eq!(app.main_pane.selected, BTreeSet::from([7]));

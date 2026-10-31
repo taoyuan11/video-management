@@ -55,3 +55,13 @@ Regression coverage also includes blocked native seek/teardown, cancellation
 without preroll, hidden/paused bus errors, watchdog expiry and padded/odd frames.
 Application tests cover stale successful loads, bounded retries, actual H.264
 pause/seek/mute/volume, EOS replay, repeated file release and corrupt/missing files.
+
+## Stable dependency update (2026-10-31)
+
+- Update GStreamer Rust bindings from 0.23 to 0.25, GLib from 0.20 to 0.22,
+  and thiserror from 1 to 2. Keep the application's bindings on the same versions
+  to share pipeline, sample and error types. The native SDK is GStreamer 1.28.8.
+- Use GLib's separate typed property check for the decoder thread limit;
+  retain the untyped availability check for optional A/V synchronization.
+- Retain the upstream 0.6.0 version, source attribution, platform code and all
+  application playback patches; iced 0.14 remains the latest stable release.

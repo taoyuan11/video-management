@@ -3,6 +3,33 @@ use iced::keyboard::key::Named;
 use iced::widget::column;
 
 impl App {
+    pub(super) fn has_tag_filter(&self) -> bool {
+        !self.tag_filter.is_empty() || !self.excluded_tag_filter.is_empty()
+    }
+
+    pub(super) fn check_tag_filter(&mut self, id: i64, on: bool, exclude: bool) -> Task<Message> {
+        let Some(index) = self.snapshot.tags.iter().position(|tag| tag.id == id) else {
+            return Task::none();
+        };
+        self.tag_filter_focus = index * 2 + usize::from(exclude);
+        let (selected, opposite) = if exclude {
+            (&mut self.excluded_tag_filter, &mut self.tag_filter)
+        } else {
+            (&mut self.tag_filter, &mut self.excluded_tag_filter)
+        };
+        let changed = if on {
+            let removed = opposite.remove(&id);
+            selected.insert(id) || removed
+        } else {
+            selected.remove(&id)
+        };
+        if changed {
+            self.reset_tag_filter_results()
+        } else {
+            Task::none()
+        }
+    }
+
     pub(super) fn reset_tag_filter_results(&mut self) -> Task<Message> {
         self.clear_tag_selection(false);
         self.main_pane.page = 0;
@@ -14,22 +41,29 @@ impl App {
         if !self.tag_filter_open {
             return Task::none();
         }
-        let actions = self.snapshot.tags.len();
+        let actions = self.snapshot.tags.len() * 2;
         let count = actions + 3;
         match key {
             Named::Tab | Named::ArrowDown | Named::ArrowUp => {
                 let backwards = key == Named::ArrowUp || (key == Named::Tab && reverse);
                 let step = if backwards { count - 1 } else { 1 };
                 self.tag_filter_focus = (self.tag_filter_focus + step) % count;
-                if self.tag_filter_focus == actions + 1 && self.tag_filter.is_empty() {
+                if self.tag_filter_focus == actions + 1 && !self.has_tag_filter() {
                     self.tag_filter_focus = (self.tag_filter_focus + step) % count;
                 }
             }
             Named::Home => self.tag_filter_focus = 0,
             Named::End => self.tag_filter_focus = count - 1,
             Named::Space | Named::Enter => {
-                let message = if let Some(tag) = self.snapshot.tags.get(self.tag_filter_focus) {
-                    Message::TagFilterCheck(tag.id, !self.tag_filter.contains(&tag.id))
+                let message = if let Some(tag) = self.snapshot.tags.get(self.tag_filter_focus / 2) {
+                    if self.tag_filter_focus.is_multiple_of(2) {
+                        Message::TagFilterCheck(tag.id, !self.tag_filter.contains(&tag.id))
+                    } else {
+                        Message::ExcludeTagFilterCheck(
+                            tag.id,
+                            !self.excluded_tag_filter.contains(&tag.id),
+                        )
+                    }
                 } else {
                     match self.tag_filter_focus - actions {
                         0 => Message::ShowTagManagement,
@@ -41,7 +75,7 @@ impl App {
             }
             _ => return Task::none(),
         }
-        if let Some(tag) = self.snapshot.tags.get(self.tag_filter_focus) {
+        if let Some(tag) = self.snapshot.tags.get(self.tag_filter_focus / 2) {
             return tags::scroll_tag_into_view(format!("filter-tag-{}", tag.id), "filter-tags");
         }
         Task::none()
@@ -49,10 +83,13 @@ impl App {
 
     pub(super) fn tag_filter_view(&self) -> Element<'_, Message> {
         let open = self.tag_filter_open && self.dialog.is_none();
-        let caption = if self.tag_filter.is_empty() {
+        let caption = if !self.has_tag_filter() {
             "我的标签".to_owned()
         } else {
-            format!("我的标签 · {}", self.tag_filter.len())
+            format!(
+                "我的标签 · {}",
+                self.tag_filter.len() + self.excluded_tag_filter.len()
+            )
         };
         let trigger = button(
             row![
@@ -64,7 +101,7 @@ impl App {
             .align_y(Alignment::Center),
         )
         .style(move |theme, status| {
-            if open || !self.tag_filter.is_empty() {
+            if open || self.has_tag_filter() {
                 item(theme, true, status)
             } else {
                 secondary(theme, status)
@@ -80,38 +117,48 @@ impl App {
         let mut options = column![].spacing(4);
         for (index, tag) in self.snapshot.tags.iter().enumerate() {
             let id = tag.id;
-            let selected = self.tag_filter.contains(&id);
-            let focused = self.tag_filter_focus;
+            let choices = [false, true].map(|exclude| {
+                let selected = if exclude {
+                    self.excluded_tag_filter.contains(&id)
+                } else {
+                    self.tag_filter.contains(&id)
+                };
+                let focused = self.tag_filter_focus == index * 2 + usize::from(exclude);
+                let message = move |on| {
+                    if exclude {
+                        Message::ExcludeTagFilterCheck(id, on)
+                    } else {
+                        Message::TagFilterCheck(id, on)
+                    }
+                };
+                button(
+                    row![
+                        checkbox(selected).size(18).on_toggle(message),
+                        button_text(if exclude { "排除" } else { "包含" }).size(12),
+                    ]
+                    .spacing(8)
+                    .height(BUTTON_CONTENT_HEIGHT)
+                    .align_y(Alignment::Center),
+                )
+                .padding(6)
+                .style(move |theme, status| filter_button(theme, status, focused, selected))
+                .on_press(message(!selected))
+            });
+            let [include, exclude] = choices;
             options = options.push(
                 container(
                     row![
-                        button(
-                            row![
-                                checkbox(selected)
-                                    .size(18)
-                                    .on_toggle(move |on| Message::TagFilterCheck(id, on)),
-                                text(&tag.name)
-                                    .size(13)
-                                    .width(Fill)
-                                    .wrapping(text::Wrapping::Glyph),
-                                text(self.tag_count(id).to_string())
-                                    .size(11)
-                                    .color(colors.muted),
-                            ]
-                            .spacing(8)
-                            .align_y(Alignment::Center)
-                        )
-                        .width(Fill)
-                        .padding(6)
-                        .style(move |theme, status| filter_button(
-                            theme,
-                            status,
-                            focused == index,
-                            selected
-                        ))
-                        .on_press(Message::TagFilterCheck(id, !selected)),
+                        text(&tag.name)
+                            .size(13)
+                            .width(Fill)
+                            .wrapping(text::Wrapping::Glyph),
+                        text(self.tag_count(id).to_string())
+                            .size(11)
+                            .color(colors.muted),
+                        include,
+                        exclude,
                     ]
-                    .spacing(4)
+                    .spacing(8)
                     .align_y(Alignment::Center),
                 )
                 .id(format!("filter-tag-{id}")),
@@ -125,11 +172,13 @@ impl App {
                     .wrapping(text::Wrapping::Glyph),
             );
         }
-        let actions = self.snapshot.tags.len();
+        let actions = self.snapshot.tags.len() * 2;
         let focus = self.tag_filter_focus;
         container(
             column![
-                text("同时包含所有勾选标签").size(12).color(colors.muted),
+                text("包含：须包含全部所选标签\n排除：不能含有任一所选标签")
+                    .size(12)
+                    .color(colors.muted),
                 scrollable(options)
                     .id("filter-tags")
                     .height(Fill)
@@ -155,9 +204,7 @@ impl App {
                             focus == actions + 1,
                             false
                         ))
-                        .on_press_maybe(
-                            (!self.tag_filter.is_empty()).then_some(Message::ClearTagFilter)
-                        ),
+                        .on_press_maybe(self.has_tag_filter().then_some(Message::ClearTagFilter)),
                     space::horizontal(),
                     button(button_text("完成").size(12))
                         .padding(8)

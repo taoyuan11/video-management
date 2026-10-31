@@ -189,7 +189,9 @@ fn windows_unsafe_paths_are_rejected() {
 #[test]
 fn verified_zip_extracts_and_rejects_unlisted_or_traversing_files() {
     let temp = tempfile::tempdir().unwrap();
-    let good = archive(temp.path(), "0.2.0", NEW, None);
+    let mut files = NEW.to_vec();
+    files.push(("lib/中文 目录/组件.dll", b"unicode plugin"));
+    let good = archive(temp.path(), "0.2.0", &files, None);
     let out = temp.path().join("out");
     fs::create_dir(&out).unwrap();
     update::extract(
@@ -203,6 +205,10 @@ fn verified_zip_extracts_and_rejects_unlisted_or_traversing_files() {
     assert_eq!(
         fs::read(out.join(update::MAIN_EXE)).unwrap(),
         b"new program"
+    );
+    assert_eq!(
+        fs::read(out.join("lib/中文 目录/组件.dll")).unwrap(),
+        b"unicode plugin"
     );
     for (i, name) in [
         "../escape",

@@ -3,7 +3,7 @@
     <option name="command" value="run --locked --package video-management --bin video-management" />
     <option name="workingDirectory" value="file://$PROJECT_DIR$" />
     <envs>
-      <env name="PATH" value="$PROJECT_DIR$/.deps/gstreamer/PFiles64/gstreamer/1.0/msvc_x86_64/bin;$PATH$" />
+      <env name="PATH" value="$PROJECT_DIR$/.deps/gstreamer/1.28.8/msvc_x86_64/bin;$PATH$" />
     </envs>
     <option name="emulateTerminal" value="true" />
     <option name="channel" value="DEFAULT" />

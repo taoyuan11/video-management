@@ -526,7 +526,12 @@ impl App {
             );
         } else if total == 0 {
             content = content.push(motion::enter(
-                (self.filter, &self.tag_filter, pending),
+                (
+                    self.filter,
+                    &self.tag_filter,
+                    &self.excluded_tag_filter,
+                    pending,
+                ),
                 self.empty_state(pending),
             ));
         } else {
@@ -634,6 +639,7 @@ impl App {
                 (
                     self.filter,
                     &self.tag_filter,
+                    &self.excluded_tag_filter,
                     &pane.search,
                     pane.sort,
                     pane.sort_order,
@@ -792,12 +798,12 @@ impl App {
     fn empty_state(&self, pending: bool) -> Element<'_, Message> {
         let colors = self.colors();
         let searching = !self.pane(pending).search.is_empty();
-        let filtering_tags = !pending && !self.tag_filter.is_empty();
+        let filtering_tags = !pending && self.has_tag_filter();
         let (glyph, title, description) = if filtering_tags {
             (
                 TAG,
                 "没有符合条件的视频",
-                "当前分类和搜索结果中，没有同时包含所有所选标签的视频。",
+                "当前分类和搜索结果中，没有符合标签包含与排除条件的视频。",
             )
         } else if searching {
             (

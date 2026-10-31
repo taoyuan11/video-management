@@ -237,7 +237,7 @@ impl Video {
             if element
                 .factory()
                 .is_some_and(|f| f.name().starts_with("avdec_"))
-                && element.has_property("max-threads", Some(i32::static_type()))
+                && element.has_property_with_type("max-threads", i32::static_type())
             {
                 // Avoid CPU-count-sized reference-frame pools alongside covers.
                 element.set_property("max-threads", 4i32);
@@ -380,7 +380,7 @@ impl Video {
                 .unwrap_or(0),
         );
 
-        let sync_av = pipeline.has_property("av-offset", None);
+        let sync_av = pipeline.has_property("av-offset");
 
         // NV12 = 12bpp
         let frame = Arc::new(Mutex::new(cleanup!(Frame::from_sample(&first))?));

@@ -1,4 +1,4 @@
-# Local-file playback profile for the pinned GStreamer 1.26.11 MSVC x64 SDK.
+# Local-file playback profile for the pinned GStreamer 1.28.8 MSVC x64 SDK.
 # Keep this list explicit: plugin discovery loads DLLs dynamically, so PE imports
 # alone cannot discover the demuxers, decoders and Windows audio/video backends.
 function Get-PlaybackPlugins {

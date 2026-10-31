@@ -463,7 +463,8 @@ pub fn extract(
     for index in 0..zip.len() {
         cancelled(cancel)?;
         let mut entry = zip.by_index(index)?;
-        let name = entry.name().trim_end_matches(['/', '\\']);
+        let entry_name = entry.name().context("ZIP 文件名编码无效")?;
+        let name = entry_name.trim_end_matches(['/', '\\']);
         let relative = relative_path(name)?;
         let key = path_id(&relative);
         ensure!(seen.insert(key.clone()), "ZIP 包含重复目标：{name}");

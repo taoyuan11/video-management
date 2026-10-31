@@ -103,6 +103,7 @@ pub enum Message {
     Search(bool, String),
     TagFilterOpen(bool),
     TagFilterCheck(i64, bool),
+    ExcludeTagFilterCheck(i64, bool),
     ClearTagFilter,
     TagFilterKey(iced::keyboard::key::Named, bool),
     Sort(bool, Sort),
@@ -166,6 +167,7 @@ pub struct App {
     snapshot: Snapshot,
     filter: Filter,
     tag_filter: BTreeSet<i64>,
+    excluded_tag_filter: BTreeSet<i64>,
     tag_filter_open: bool,
     tag_filter_focus: usize,
     main_pane: Pane,
@@ -234,6 +236,7 @@ impl App {
                 snapshot: Snapshot::default(),
                 filter: Filter::All,
                 tag_filter: BTreeSet::new(),
+                excluded_tag_filter: BTreeSet::new(),
                 tag_filter_open: false,
                 tag_filter_focus: 0,
                 main_pane: Pane::default(),
@@ -719,21 +722,18 @@ impl App {
                 }
             }
             Message::TagFilterCheck(id, on) => {
-                if let Some(index) = self.snapshot.tags.iter().position(|tag| tag.id == id) {
-                    self.tag_filter_focus = index;
-                    let changed = if on {
-                        self.tag_filter.insert(id)
-                    } else {
-                        self.tag_filter.remove(&id)
-                    };
-                    if changed {
-                        return self.reset_tag_filter_results();
-                    }
-                }
+                return self.check_tag_filter(id, on, false);
+            }
+            Message::ExcludeTagFilterCheck(id, on) => {
+                return self.check_tag_filter(id, on, true);
             }
             Message::ClearTagFilter => {
-                if !self.tag_filter.is_empty() {
+                if self.has_tag_filter() {
                     self.tag_filter.clear();
+                    self.excluded_tag_filter.clear();
+                    if self.tag_filter_focus == self.snapshot.tags.len() * 2 + 1 {
+                        self.tag_filter_focus += 1;
+                    }
                     return self.reset_tag_filter_results();
                 }
             }
@@ -1256,6 +1256,10 @@ impl App {
                             Filter::Missing => v.missing(),
                         }
                         && self.tag_filter.iter().all(|id| v.tag_ids.contains(id))
+                        && !self
+                            .excluded_tag_filter
+                            .iter()
+                            .any(|id| v.tag_ids.contains(id))
                 };
                 in_view
                     && (query.is_empty()

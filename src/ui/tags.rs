@@ -76,18 +76,23 @@ impl App {
         if let Some((_, Dialog::Tags(picker))) = &mut self.dialog {
             picker.reconcile(&self.snapshot);
         }
-        let previous = self.tag_filter.len();
+        let previous = self.tag_filter.len() + self.excluded_tag_filter.len();
         self.tag_filter.retain(|id| available.contains(id));
-        self.tag_filter_focus = self.tag_filter_focus.min(self.snapshot.tags.len() + 2);
+        self.excluded_tag_filter.retain(|id| available.contains(id));
+        self.tag_filter_focus = self.tag_filter_focus.min(self.snapshot.tags.len() * 2 + 2);
+        if !self.has_tag_filter() && self.tag_filter_focus == self.snapshot.tags.len() * 2 + 1 {
+            self.tag_filter_focus += 1;
+        }
         self.tag_management_focus = self
             .tag_management_focus
             .min(self.snapshot.tags.len() * 2 + 1);
-        if self.tag_filter.len() != previous {
+        let changed = self.tag_filter.len() + self.excluded_tag_filter.len() != previous;
+        if changed {
             self.clear_tag_selection(false);
             self.main_pane.page = 0;
             self.main_pane.page_input = None;
         }
-        self.tag_filter.len() != previous
+        changed
     }
 
     pub(super) fn open_tag_picker(&mut self, action: TagAction) {
@@ -567,27 +572,93 @@ mod tests {
     }
 
     #[test]
+    fn exclusion_filters_reject_any_selected_tag_and_combine_with_inclusions() {
+        let (_temp, mut app) = app();
+        let ids = |app: &App| app.filtered(false).iter().map(|v| v.id).collect::<Vec<_>>();
+        let _ = app.update(Message::ExcludeTagFilterCheck(1, true));
+        assert_eq!(ids(&app), vec![3, 2]);
+        let _ = app.update(Message::ExcludeTagFilterCheck(3, true));
+        assert_eq!(ids(&app), vec![3]); // Untagged videos still match.
+        let _ = app.update(Message::ExcludeTagFilterCheck(4, true));
+        assert_eq!(ids(&app), vec![3]); // An unused tag excludes nothing.
+        assert_eq!(app.filtered(true).len(), 2);
+        let _ = app.update(Message::ExcludeTagFilterCheck(1, false));
+        assert_eq!(ids(&app), vec![3, 1]);
+        let _ = app.update(Message::TagFilterCheck(2, true));
+        let _ = app.update(Message::TagFilterCheck(1, true));
+        assert_eq!(ids(&app), vec![1]);
+        let _ = app.update(Message::ClearTagFilter);
+        assert!(!app.has_tag_filter());
+        assert_eq!(ids(&app), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn exclusion_filters_respect_search_categories_and_pending_results() {
+        let (_temp, mut app) = app();
+        let _ = app.update(Message::TagFilterCheck(2, true));
+        let _ = app.update(Message::ExcludeTagFilterCheck(1, true));
+        let _ = app.update(Message::Search(false, "视频1".into()));
+        assert!(app.filtered(false).is_empty());
+        let _ = app.update(Message::Search(false, "2.mp4".into()));
+        assert_eq!(app.filtered(false)[0].id, 2);
+        assert_eq!(app.filtered(true).len(), 2);
+
+        let mut copy = app.snapshot.videos[1].files[0].clone();
+        copy.id = 20;
+        app.snapshot.videos[1].files.push(copy);
+        let _ = app.update(Message::Filter(Filter::Duplicates));
+        assert_eq!(app.filtered(false)[0].id, 2);
+        let _ = app.update(Message::ExcludeTagFilterCheck(3, true));
+        assert!(app.filtered(false).is_empty());
+        let _ = app.update(Message::ExcludeTagFilterCheck(3, false));
+        for file in &mut app.snapshot.videos[1].files {
+            file.availability = Availability::Missing;
+        }
+        let _ = app.update(Message::Filter(Filter::Missing));
+        assert_eq!(app.filtered(false)[0].id, 2);
+        let _ = app.update(Message::ExcludeTagFilterCheck(3, true));
+        assert!(app.filtered(false).is_empty());
+        let _ = app.update(Message::ClearTagFilter);
+        assert_eq!(app.filter, Filter::Missing);
+        assert_eq!(app.main_pane.search, "2.mp4");
+        assert_eq!(app.filtered(false)[0].id, 2);
+
+        let _ = app.update(Message::Search(false, String::new()));
+        let _ = app.update(Message::Filter(Filter::Untagged));
+        let _ = app.update(Message::ExcludeTagFilterCheck(2, true));
+        assert_eq!(app.filtered(false)[0].id, 3);
+    }
+
+    #[test]
     fn changing_tag_filters_resets_results_but_keeps_menu_open_and_pending_draft() {
         let (_temp, mut app) = app();
-        app.main_pane.page = 2;
-        app.main_pane.page_input = Some("3".into());
-        app.main_pane.selected.insert(1);
-        app.main_pane.focus = Some(1);
-        app.main_pane.tag_draft.insert(4);
-        app.pending_pane.tag_draft.insert(3);
-        let _ = app.update(Message::TagFilterOpen(true));
-        let _ = app.update(Message::TagFilterCheck(1, true));
-        assert!(app.tag_filter_open);
-        assert_eq!(app.main_pane.page, 0);
-        assert!(app.main_pane.page_input.is_none());
-        assert!(app.main_pane.selected.is_empty());
-        assert!(app.main_pane.focus.is_none());
-        assert!(app.main_pane.tag_draft.is_empty());
-        assert_eq!(app.pending_pane.tag_draft, BTreeSet::from([3]));
+        for message in [
+            Message::TagFilterCheck(1, true),
+            Message::ExcludeTagFilterCheck(2, true),
+        ] {
+            app.main_pane.page = 2;
+            app.main_pane.page_input = Some("3".into());
+            app.main_pane.selected.insert(1);
+            app.main_pane.focus = Some(1);
+            app.main_pane.tag_draft.insert(4);
+            app.pending_pane.tag_draft.insert(3);
+            let _ = app.update(Message::TagFilterOpen(true));
+            let _ = app.update(message);
+            assert!(app.tag_filter_open);
+            assert_eq!(app.main_pane.page, 0);
+            assert!(app.main_pane.page_input.is_none());
+            assert!(app.main_pane.selected.is_empty());
+            assert!(app.main_pane.focus.is_none());
+            assert!(app.main_pane.tag_draft.is_empty());
+            assert_eq!(app.pending_pane.tag_draft, BTreeSet::from([3]));
+        }
         let _ = app.update(Message::TagFilterCheck(999, true));
+        let _ = app.update(Message::ExcludeTagFilterCheck(999, true));
         assert_eq!(app.tag_filter, BTreeSet::from([1]));
+        assert_eq!(app.excluded_tag_filter, BTreeSet::from([2]));
         let _ = app.update(Message::TagFilterOpen(false));
         assert_eq!(app.tag_filter, BTreeSet::from([1]));
+        assert_eq!(app.excluded_tag_filter, BTreeSet::from([2]));
     }
 
     #[test]
@@ -604,11 +675,34 @@ mod tests {
     }
 
     #[test]
+    fn deleted_exclusions_are_reconciled_without_losing_other_filters() {
+        let (_temp, mut app) = app();
+        let _ = app.update(Message::TagFilterCheck(2, true));
+        let _ = app.update(Message::ExcludeTagFilterCheck(1, true));
+        let _ = app.update(Message::ExcludeTagFilterCheck(4, true));
+        app.snapshot.tags[0].name = "重命名后的排除标签".into();
+        assert!(!app.reconcile_tags());
+        assert_eq!(app.excluded_tag_filter, BTreeSet::from([1, 4]));
+        app.main_pane.page = 2;
+        app.main_pane.page_input = Some("3".into());
+        app.main_pane.selected.insert(2);
+        app.snapshot.tags.retain(|tag| tag.id != 1);
+        assert!(app.reconcile_tags());
+        assert_eq!(app.tag_filter, BTreeSet::from([2]));
+        assert_eq!(app.excluded_tag_filter, BTreeSet::from([4]));
+        assert_eq!(app.main_pane.page, 0);
+        assert!(app.main_pane.page_input.is_none());
+        assert!(app.main_pane.selected.is_empty());
+        assert_eq!(app.filtered(false).len(), 2);
+    }
+
+    #[test]
     fn tag_filter_keyboard_supports_multi_select_management_and_empty_menu() {
         use iced::keyboard::key::Named;
         let (_temp, mut app) = app();
         let _ = app.update(Message::TagFilterOpen(true));
         let _ = app.update(Message::TagFilterKey(Named::Space, false));
+        let _ = app.update(Message::TagFilterKey(Named::Tab, false));
         let _ = app.update(Message::TagFilterKey(Named::Tab, false));
         let _ = app.update(Message::TagFilterKey(Named::Enter, false));
         assert_eq!(app.tag_filter, BTreeSet::from([1, 2]));
@@ -630,6 +724,44 @@ mod tests {
         assert_eq!(app.tag_filter_focus, 0);
         let _ = app.update(Message::TagFilterKey(Named::Enter, false));
         assert_eq!(app.page, MainPage::Tags);
+        assert!(!app.tag_filter_open);
+    }
+
+    #[test]
+    fn tag_filter_keyboard_switches_include_exclude_and_clears_exclusions() {
+        use iced::keyboard::key::Named;
+        let (_temp, mut app) = app();
+        let _ = app.update(Message::TagFilterOpen(true));
+        let _ = app.update(Message::TagFilterKey(Named::Space, false));
+        assert_eq!(app.tag_filter, BTreeSet::from([1]));
+        let _ = app.update(Message::TagFilterKey(Named::Tab, false));
+        let _ = app.update(Message::TagFilterKey(Named::Enter, false));
+        assert!(app.tag_filter.is_empty());
+        assert_eq!(app.excluded_tag_filter, BTreeSet::from([1]));
+        let _ = app.update(Message::TagFilterKey(Named::ArrowDown, false));
+        let _ = app.update(Message::TagFilterKey(Named::ArrowDown, false));
+        let _ = app.update(Message::TagFilterKey(Named::Space, false));
+        assert_eq!(app.excluded_tag_filter, BTreeSet::from([1, 2]));
+        let _ = app.update(Message::TagFilterKey(Named::ArrowUp, false));
+        let _ = app.update(Message::TagFilterKey(Named::Enter, false));
+        assert_eq!(app.tag_filter, BTreeSet::from([2]));
+        assert_eq!(app.excluded_tag_filter, BTreeSet::from([1]));
+        let _ = app.update(Message::TagFilterKey(Named::Space, false));
+        assert!(app.tag_filter.is_empty());
+
+        let _ = app.update(Message::TagFilterKey(Named::End, false));
+        let _ = app.update(Message::TagFilterKey(Named::Tab, true));
+        assert_eq!(app.tag_filter_focus, app.snapshot.tags.len() * 2 + 1);
+        let _ = app.update(Message::TagFilterKey(Named::Enter, false));
+        assert!(!app.has_tag_filter());
+        assert_eq!(app.filtered(false).len(), 3);
+        assert!(app.tag_filter_open);
+        assert_eq!(app.tag_filter_focus, app.snapshot.tags.len() * 2 + 2);
+        let _ = app.update(Message::TagFilterKey(Named::Tab, true));
+        assert_eq!(app.tag_filter_focus, app.snapshot.tags.len() * 2); // Skip disabled clear.
+        let _ = app.update(Message::TagFilterKey(Named::Home, false));
+        let _ = app.update(Message::TagFilterKey(Named::Tab, true));
+        let _ = app.update(Message::TagFilterKey(Named::Enter, false));
         assert!(!app.tag_filter_open);
     }
 

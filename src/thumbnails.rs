@@ -335,7 +335,7 @@ fn extract(
         if element
             .factory()
             .is_some_and(|factory| factory.name().starts_with("avdec_"))
-            && element.has_property("max-threads", Some(i32::static_type()))
+            && element.has_property_with_type("max-threads", i32::static_type())
         {
             element.set_property("max-threads", 1i32);
         }
