@@ -19,6 +19,16 @@ use std::time::{Duration, Instant};
 
 const HIDE_AFTER: Duration = Duration::from_secs(3);
 const PAD: f32 = 8.0;
+const MINI_WIDTH: f32 = 400.0;
+const MINI_HEIGHT: f32 = 240.0;
+
+fn metrics(size: Size) -> MediaMetrics {
+    if size.width < MINI_WIDTH || size.height < MINI_HEIGHT {
+        MediaMetrics::MINI
+    } else {
+        MediaMetrics::REGULAR
+    }
+}
 
 pub(super) fn view(app: &App, height: Length) -> Element<'_, Message> {
     let video = app.player.as_ref().expect("loaded player");
@@ -370,7 +380,9 @@ fn activate(control: Control, key: Key, shell: &mut Shell<'_, Message>) {
 }
 
 struct Geometry {
+    metrics: MediaMetrics,
     bounds: Rectangle,
+    header: Rectangle,
     title: Rectangle,
     footer: Rectangle,
     time: Rectangle,
@@ -381,54 +393,72 @@ struct Geometry {
 
 impl Geometry {
     fn new(bounds: Rectangle, time_width: f32) -> Self {
-        let x = bounds.x + PAD;
-        let width = (bounds.width - 2.0 * PAD).max(0.0);
-        let y = bounds.y + bounds.height - PAD - MEDIA_CONTROL_SIZE;
-        let button = |x| {
-            Rectangle::new(
-                Point::new(x, y),
-                Size::new(MEDIA_CONTROL_SIZE, MEDIA_CONTROL_SIZE),
-            )
-        };
+        let metrics = metrics(bounds.size());
+        let pad = metrics.padding;
+        let x = bounds.x + pad;
+        let width = (bounds.width - 2.0 * pad).max(0.0);
+        let y = bounds.y + bounds.height - pad - metrics.button;
+        let button =
+            |x| Rectangle::new(Point::new(x, y), Size::new(metrics.button, metrics.button));
         let play = button(x);
-        let full = button(x + width - MEDIA_CONTROL_SIZE);
-        let mute = button(full.x - MEDIA_CONTROL_SIZE - 4.0);
-        let time_x = play.x + play.width + PAD;
-        let compact = time_width > mute.x - PAD - time_x;
+        let full = button(x + width - metrics.button);
+        let mute = button(full.x - metrics.button - metrics.gap);
+        let time_x = play.x + play.width + pad;
+        let compact = time_width > mute.x - pad - time_x;
         let time = if compact {
-            Rectangle::new(Point::new(x, y - 20.0), Size::new(width, 20.0))
+            Rectangle::new(
+                Point::new(x, y - metrics.line_height),
+                Size::new(width, metrics.line_height),
+            )
         } else {
             Rectangle::new(
-                Point::new(time_x, y + 6.0),
-                Size::new(mute.x - PAD - time_x, 20.0),
+                Point::new(time_x, y + (metrics.button - metrics.line_height) / 2.0),
+                Size::new(mute.x - pad - time_x, metrics.line_height),
             )
         };
         let seek = Rectangle::new(
-            Point::new(x, y - if compact { 44.0 } else { 24.0 }),
-            Size::new(width, 24.0),
+            Point::new(
+                x,
+                y - metrics.seek_height - if compact { metrics.line_height } else { 0.0 },
+            ),
+            Size::new(width, metrics.seek_height),
         );
-        let popup_width = 48.0;
-        let popup_height = (y - bounds.y - PAD).min(144.0);
+        let popup_width = metrics.button + metrics.popup_padding * 2.0;
+        let popup_height = (y - bounds.y - pad).min(metrics.popup_height);
         let popup = Rectangle::new(
             Point::new(mute.center_x() - popup_width / 2.0, y - popup_height),
             Size::new(popup_width, popup_height),
         );
         let volume = Rectangle::new(
-            Point::new(popup.x + PAD, popup.y + 32.0),
-            Size::new(MEDIA_CONTROL_SIZE, popup.height - 40.0),
+            Point::new(
+                popup.x + metrics.popup_padding,
+                popup.y + metrics.popup_padding + metrics.line_height + metrics.gap,
+            ),
+            Size::new(
+                metrics.button,
+                popup.height - metrics.popup_padding * 2.0 - metrics.line_height - metrics.gap,
+            ),
         );
         Self {
+            metrics,
             bounds,
-            title: Rectangle::new(Point::new(x, bounds.y + PAD), Size::new(width, 20.0)),
+            header: Rectangle::new(
+                bounds.position(),
+                Size::new(bounds.width, metrics.line_height + pad * 2.0),
+            ),
+            title: Rectangle::new(
+                Point::new(x, bounds.y + pad),
+                Size::new(width, metrics.line_height),
+            ),
             footer: Rectangle::new(
-                Point::new(bounds.x, seek.y - PAD),
-                Size::new(bounds.width, bounds.y + bounds.height - seek.y + PAD),
+                Point::new(bounds.x, seek.y - pad),
+                Size::new(bounds.width, bounds.y + bounds.height - seek.y + pad),
             ),
             time,
             popup,
             percent: Rectangle::new(
-                Point::new(popup.x + 6.0, popup.y + PAD),
-                Size::new(36.0, 20.0),
+                Point::new(popup.x + pad, popup.y + metrics.popup_padding),
+                Size::new(popup.width - pad * 2.0, metrics.line_height),
             ),
             controls: [seek, play, mute, volume, full],
         }
@@ -440,15 +470,17 @@ impl Geometry {
 
     fn rail(&self, control: Control) -> Rectangle {
         let bounds = self.rect(control);
+        let inset = self.metrics.rail_inset;
+        let thickness = self.metrics.rail_thickness;
         if control == Control::Volume {
             Rectangle::new(
-                Point::new(bounds.center_x() - 2.0, bounds.y + 6.0),
-                Size::new(4.0, (bounds.height - 12.0).max(1.0)),
+                Point::new(bounds.center_x() - thickness / 2.0, bounds.y + inset),
+                Size::new(thickness, (bounds.height - inset * 2.0).max(1.0)),
             )
         } else {
             Rectangle::new(
-                Point::new(bounds.x + 6.0, bounds.center_y() - 2.0),
-                Size::new((bounds.width - 12.0).max(1.0), 4.0),
+                Point::new(bounds.x + inset, bounds.center_y() - thickness / 2.0),
+                Size::new((bounds.width - inset * 2.0).max(1.0), thickness),
             )
         }
     }
@@ -481,6 +513,7 @@ struct State {
     input: Interaction,
     title_source: String,
     title_width: f32,
+    title_size: f32,
     title: String,
     time_width: f32,
 }
@@ -492,6 +525,7 @@ impl State {
             input: Interaction::new(Instant::now()),
             title_source: String::new(),
             title_width: -1.0,
+            title_size: 0.0,
             title: String::new(),
             time_width: 0.0,
         }
@@ -513,13 +547,18 @@ impl Widget<Message, Theme, Renderer> for Player<'_> {
             .as_widget_mut()
             .layout(&mut tree.children[0], renderer, limits);
         let state = tree.state.downcast_mut::<State>();
-        let width = (content.size().width - PAD * 2.0).max(0.0);
-        if state.title_source != self.title || state.title_width != width {
-            self.title.clone_into(&mut state.title_source.to_string());
+        let metrics = metrics(content.size());
+        let width = (content.size().width - metrics.padding * 2.0).max(0.0);
+        if state.title_source != self.title
+            || state.title_width != width
+            || state.title_size != metrics.title_size
+        {
+            self.title.clone_into(&mut state.title_source);
             state.title_width = width;
-            state.title = ellipsize(self.title, width, |s| measure(s, 12.0));
+            state.title_size = metrics.title_size;
+            state.title = ellipsize(self.title, width, |s| measure(s, metrics.title_size));
         }
-        state.time_width = measure(&self.playback.time(), 11.0);
+        state.time_width = measure(&self.playback.time(), metrics.text_size);
         layout::Node::with_children(content.size(), vec![content])
     }
     fn draw(
@@ -679,18 +718,14 @@ impl Widget<Message, Theme, Renderer> for Player<'_> {
 
 impl Player<'_> {
     fn draw_controls(&self, state: &State, g: &Geometry, renderer: &mut Renderer, clip: Rectangle) {
-        quad(
-            renderer,
-            Rectangle::new(g.bounds.position(), Size::new(g.bounds.width, 36.0)),
-            MEDIA_SCRIM,
-            0.0,
-        );
+        let metrics = g.metrics;
+        quad(renderer, g.header, MEDIA_SCRIM, 0.0);
         quad(renderer, g.footer, MEDIA_SCRIM, 0.0);
         draw_text(
             renderer,
             &state.title,
             g.title,
-            12.0,
+            metrics.title_size,
             TEXT_FONT,
             MEDIA_TEXT,
             clip,
@@ -699,7 +734,7 @@ impl Player<'_> {
             renderer,
             &self.playback.time(),
             g.time,
-            11.0,
+            metrics.text_size,
             TEXT_FONT,
             MEDIA_TEXT,
             clip,
@@ -742,16 +777,19 @@ impl Player<'_> {
             ),
         ] {
             let rect = g.rect(control);
-            control_focus(state, control, rect, renderer);
+            control_focus(state, control, g, renderer);
             let icon = Rectangle::new(
-                Point::new(rect.center_x() - 8.0, rect.center_y() - 10.0),
-                Size::new(16.0, 20.0),
+                Point::new(
+                    rect.center_x() - metrics.icon / 2.0,
+                    rect.center_y() - metrics.line_height / 2.0,
+                ),
+                Size::new(metrics.icon, metrics.line_height),
             );
             draw_text(
                 renderer,
                 &glyph.to_string(),
                 icon,
-                16.0,
+                metrics.icon,
                 icon_font(),
                 MEDIA_TEXT,
                 clip,
@@ -759,13 +797,13 @@ impl Player<'_> {
         }
         if state.input.popup() {
             renderer.with_layer(clip, |renderer| {
-                quad(renderer, g.popup, MEDIA_POPUP, 8.0);
+                quad(renderer, g.popup, MEDIA_POPUP, metrics.radius);
                 self.draw_slider(state, g, Control::Volume, self.playback.volume, renderer);
                 draw_text(
                     renderer,
                     &format!("{}%", (self.playback.volume * 100.0).round()),
                     g.percent,
-                    11.0,
+                    metrics.text_size,
                     TEXT_FONT,
                     MEDIA_TEXT,
                     clip,
@@ -782,7 +820,7 @@ impl Player<'_> {
         fraction: f64,
         renderer: &mut Renderer,
     ) {
-        control_focus(state, control, g.rect(control), renderer);
+        control_focus(state, control, g, renderer);
         let rail = g.rail(control);
         let fraction = fraction.clamp(0.0, 1.0) as f32;
         let (filled, thumb) = if control == Control::Volume {
@@ -800,28 +838,34 @@ impl Player<'_> {
             )
         };
         let enabled = control != Control::Seek || self.playback.seekable();
-        quad(renderer, rail, MEDIA_TRACK, 2.0);
+        quad(renderer, rail, MEDIA_TRACK, g.metrics.rail_thickness / 2.0);
         quad(
             renderer,
             filled,
             if enabled { MEDIA_ACCENT } else { MEDIA_MUTED },
-            2.0,
+            g.metrics.rail_thickness / 2.0,
         );
+        let radius = g.metrics.thumb_radius;
         quad(
             renderer,
             Rectangle::new(
-                Point::new(thumb.x - 5.0, thumb.y - 5.0),
-                Size::new(10.0, 10.0),
+                Point::new(thumb.x - radius, thumb.y - radius),
+                Size::new(radius * 2.0, radius * 2.0),
             ),
             if enabled { MEDIA_TEXT } else { MEDIA_MUTED },
-            5.0,
+            radius,
         );
     }
 }
 
-fn control_focus(state: &State, control: Control, bounds: Rectangle, renderer: &mut Renderer) {
+fn control_focus(state: &State, control: Control, geometry: &Geometry, renderer: &mut Renderer) {
     if state.input.focused() == Some(control) {
-        quad(renderer, bounds, MEDIA_FOCUS, 8.0);
+        quad(
+            renderer,
+            geometry.rect(control),
+            MEDIA_FOCUS,
+            geometry.metrics.radius,
+        );
     }
 }
 
@@ -841,7 +885,7 @@ fn text_spec(content: &str, size: f32, font: Font, bounds: Size) -> text::Text<&
         content,
         bounds,
         size: size.into(),
-        line_height: iced::Pixels(20.0).into(),
+        line_height: iced::Pixels(bounds.height).into(),
         font,
         align_x: text::Alignment::Left,
         align_y: iced::alignment::Vertical::Top,
@@ -1372,6 +1416,10 @@ mod tests {
         for size in [
             Size::new(256.0, 128.0),
             Size::new(256.0, 455.0),
+            Size::new(399.0, 240.0),
+            Size::new(400.0, 239.0),
+            Size::new(400.0, 240.0),
+            Size::new(596.0, 128.0),
             Size::new(596.0, 335.0),
             Size::new(1920.0, 1080.0),
         ] {
@@ -1380,23 +1428,28 @@ mod tests {
                 for rect in g
                     .controls
                     .into_iter()
-                    .chain([g.title, g.time, g.popup, g.percent, g.footer])
+                    .chain([g.header, g.title, g.time, g.popup, g.percent, g.footer])
                 {
                     assert!(rect.x >= g.bounds.x && rect.y >= g.bounds.y);
                     assert!(rect.x + rect.width <= g.bounds.x + size.width);
                     assert!(rect.y + rect.height <= g.bounds.y + size.height);
                 }
                 assert!(g.title.y + g.title.height <= g.footer.y);
+                assert!(g.header.intersection(&g.footer).is_none());
                 let volume = g.rect(Control::Volume);
                 let rail = g.rail(Control::Volume);
                 assert!(rail.height > rail.width);
                 assert_eq!(rail.center_x(), g.rect(Control::Mute).center_x());
                 assert_eq!(g.popup.y + g.popup.height, g.rect(Control::Mute).y);
                 assert!(g.percent.intersection(&volume).is_none());
-                assert!(g.popup.contains(Point::new(rail.center_x(), rail.y - 5.0)));
+                let radius = g.metrics.thumb_radius;
                 assert!(
                     g.popup
-                        .contains(Point::new(rail.center_x(), rail.y + rail.height + 5.0))
+                        .contains(Point::new(rail.center_x(), rail.y - radius))
+                );
+                assert!(
+                    g.popup
+                        .contains(Point::new(rail.center_x(), rail.y + rail.height + radius))
                 );
                 for (index, left) in g.controls.iter().enumerate() {
                     if index == Control::Volume as usize {
@@ -1411,6 +1464,112 @@ mod tests {
                 assert!(g.time.width >= time_width);
             }
         }
+    }
+
+    #[test]
+    fn mini_switches_on_actual_player_size_and_releases_more_picture_area() {
+        for (size, expected) in [
+            (Size::new(399.0, 600.0), MediaMetrics::MINI),
+            (Size::new(1200.0, 239.0), MediaMetrics::MINI),
+            (Size::new(400.0, 240.0), MediaMetrics::REGULAR),
+            (Size::new(1920.0, 1080.0), MediaMetrics::REGULAR),
+        ] {
+            // Time-label length may move the timestamp onto a second line,
+            // but must never change the size mode or cause a feedback loop.
+            for time_width in [70.0, 210.0] {
+                assert_eq!(
+                    Geometry::new(Rectangle::with_size(size), time_width).metrics,
+                    expected
+                );
+            }
+        }
+        let mini = Geometry::new(Rectangle::with_size(Size::new(256.0, 455.0)), 110.0);
+        let regular = Geometry::new(Rectangle::with_size(Size::new(596.0, 455.0)), 110.0);
+        assert_eq!(mini.header.height + mini.footer.height, 72.0);
+        assert_eq!(regular.header.height + regular.footer.height, 108.0);
+        assert!(mini.popup.width * mini.popup.height < regular.popup.width * regular.popup.height);
+        assert!(mini.metrics.title_size < regular.metrics.title_size);
+        assert!(mini.metrics.text_size < regular.metrics.text_size);
+        assert!(mini.metrics.icon < regular.metrics.icon);
+        for g in [&mini, &regular] {
+            for control in CONTROLS {
+                assert_eq!(
+                    g.hit(g.rect(control).center(), control == Control::Volume, true),
+                    Some(control)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resizing_between_modes_preserves_focus_drag_and_control_actions() {
+        let player_key = key();
+        let player = |size: Size| Player {
+            content: iced::widget::space()
+                .width(size.width)
+                .height(size.height)
+                .into(),
+            title: "很长的视频名称.mp4",
+            pending: false,
+            key: player_key,
+            playback: playback(),
+        };
+        let regular = Size::new(596.0, 335.0);
+        let mini = Size::new(256.0, 144.0);
+        let initial = player(regular);
+        let mut tree = Tree::new(&initial as &dyn Widget<Message, Theme, Renderer>);
+        let now = Instant::now();
+        {
+            let input = &mut tree.state.downcast_mut::<State>().input;
+            input.now = now;
+            input.focus[Control::Volume as usize].focus();
+            input.drag = Some(Control::Volume);
+            input.pressed = Some(Control::Volume);
+        }
+        for size in [mini, regular, mini, regular] {
+            player(size).diff(&mut tree);
+            let input = &mut tree.state.downcast_mut::<State>().input;
+            assert_eq!(input.focused(), Some(Control::Volume));
+            assert_eq!(input.drag, Some(Control::Volume));
+            let g = Geometry::new(Rectangle::with_size(size), 110.0);
+            let position = g.rail(Control::Volume).center();
+            let mut messages = Vec::new();
+            input.handle(
+                &moved(position),
+                Some(position),
+                &g,
+                playback(),
+                player_key,
+                &mut Shell::new(&mut messages),
+            );
+            assert!(matches!(messages.as_slice(), [Message::Volume(0.5)]));
+            assert!(input.visible());
+            assert!(input.popup());
+        }
+        let input = &mut tree.state.downcast_mut::<State>().input;
+        let g = Geometry::new(Rectangle::with_size(regular), 110.0);
+        let mut messages = Vec::new();
+        input.handle(
+            &release(),
+            None,
+            &g,
+            playback(),
+            player_key,
+            &mut Shell::new(&mut messages),
+        );
+        input.focus[Control::Volume as usize].unfocus();
+        input.focus[Control::Fullscreen as usize].focus();
+        input.handle(
+            &keyboard(Named::Enter, keyboard::Modifiers::empty()),
+            None,
+            &g,
+            playback(),
+            player_key,
+            &mut Shell::new(&mut messages),
+        );
+        assert!(
+            matches!(messages.as_slice(), [Message::Fullscreen(owner)] if *owner == player_key.owner)
+        );
     }
 
     #[test]

@@ -654,6 +654,12 @@ impl Video {
         self.get_mut().seek(position, accurate)
     }
 
+    /// Whether the latest seek is still queued or waiting for a fresh position.
+    /// While true, `position()` may still contain progress from before the seek.
+    pub fn is_seeking(&self) -> bool {
+        self.read().control.is_seeking()
+    }
+
     /// Set the playback speed of the media.
     /// The default speed is `1.0`.
     pub fn set_speed(&mut self, speed: f64) -> Result<(), Error> {

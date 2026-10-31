@@ -73,7 +73,10 @@ fn repeated_load_seek_pause_stop_releases_the_actual_file() {
                 .seek(Duration::from_millis(milliseconds), true)
                 .unwrap();
         }
-        wait_for(|| video.position().abs_diff(Duration::from_secs(2)) < Duration::from_millis(100));
+        wait_for(|| {
+            !video.is_seeking()
+                && video.position().abs_diff(Duration::from_secs(2)) < Duration::from_millis(100)
+        });
         assert!(video.take_error().is_none());
         assert!(video.shutdown(Duration::from_secs(3)));
         assert_eq!(pipeline.current_state(), gst::State::Null);
@@ -94,7 +97,8 @@ fn end_of_stream_can_restart_without_a_widget() {
     wait_for(|| video.eos());
     video.set_paused(false);
     wait_for(|| {
-        !video.eos()
+        !video.is_seeking()
+            && !video.eos()
             && video.position() > Duration::from_millis(50)
             && video.position() < Duration::from_secs(2)
     });

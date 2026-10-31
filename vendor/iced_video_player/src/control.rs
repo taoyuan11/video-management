@@ -13,7 +13,7 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(20);
 #[derive(Debug, Default)]
 struct Pending {
     paused: Option<bool>,
-    seek: Option<(Position, bool, f64)>,
+    seek: Option<(u64, Position, bool, f64)>,
     volume: Option<f64>,
     muted: Option<bool>,
     subtitle: Option<String>,
@@ -29,6 +29,8 @@ pub(crate) struct Control {
     pub eos: AtomicBool,
     pub eos_event: AtomicBool,
     pub position: AtomicU64,
+    requested_seek: AtomicU64,
+    completed_seek: AtomicU64,
     pub duration: AtomicU64,
     pub last_frame: Mutex<Instant>,
     heartbeat: Mutex<Instant>,
@@ -48,6 +50,8 @@ impl Control {
             eos: AtomicBool::new(false),
             eos_event: AtomicBool::new(false),
             position: AtomicU64::new(0),
+            requested_seek: AtomicU64::new(0),
+            completed_seek: AtomicU64::new(0),
             duration: AtomicU64::new(duration.as_nanos() as u64),
             last_frame: Mutex::new(Instant::now()),
             heartbeat: Mutex::new(Instant::now()),
@@ -68,7 +72,14 @@ impl Control {
     pub fn seek(&self, position: Position, accurate: bool, speed: f64) {
         self.eos.store(false, Ordering::Release);
         self.eos_event.store(false, Ordering::Release);
-        self.submit(|p| p.seek = Some((position, accurate, speed)));
+        self.submit(|p| {
+            let serial = self.requested_seek.fetch_add(1, Ordering::AcqRel) + 1;
+            p.seek = Some((serial, position, accurate, speed));
+        });
+    }
+
+    pub fn is_seeking(&self) -> bool {
+        self.completed_seek.load(Ordering::Acquire) != self.requested_seek.load(Ordering::Acquire)
     }
 
     pub fn volume(&self, volume: f64, muted: bool) {
@@ -131,6 +142,7 @@ impl Control {
         let mut last_position = 0;
         let mut progress = Instant::now();
         let mut queried = Instant::now() - Duration::from_secs(1);
+        let mut seeking: Option<(u64, Instant)> = None;
         while self.alive.load(Ordering::Acquire) {
             let pending = {
                 let mut commands = self.pending.lock().unwrap();
@@ -156,7 +168,8 @@ impl Control {
             if let Some(offset) = pending.offset {
                 pipeline.set_property("av-offset", offset);
             }
-            if let Some((position, accurate, speed)) = pending.seek {
+            if let Some((serial, position, accurate, speed)) = pending.seek {
+                seeking = Some((serial, Instant::now()));
                 let flags = gst::SeekFlags::FLUSH
                     | if accurate {
                         gst::SeekFlags::ACCURATE
@@ -206,8 +219,16 @@ impl Control {
                 }
             }
             if queried.elapsed() >= Duration::from_millis(100) {
-                if let Some(position) = pipeline.query_position::<gst::ClockTime>() {
+                // A successful seek submission can still be waiting for preroll.
+                // Publish completion only with a fresh position after it settles.
+                let settled = seeking.is_none()
+                    || pipeline.state(gst::ClockTime::ZERO).0? != gst::StateChangeSuccess::Async;
+                if settled && let Some(position) = pipeline.query_position::<gst::ClockTime>() {
                     self.position.store(position.nseconds(), Ordering::Release);
+                    if let Some((serial, _)) = seeking.take() {
+                        // An older seek must never acknowledge a newer queued one.
+                        self.completed_seek.store(serial, Ordering::Release);
+                    }
                     if position.nseconds() != last_position {
                         progress = Instant::now();
                         last_position = position.nseconds();
@@ -217,6 +238,10 @@ impl Control {
                     self.duration.store(duration.nseconds(), Ordering::Release);
                 }
                 queried = Instant::now();
+            }
+            if seeking.is_some_and(|(_, started)| started.elapsed() > CONTROL_TIMEOUT) {
+                self.fail("视频跳转超时，请检查文件或网络连接后重试");
+                break;
             }
             if self.paused.load(Ordering::Acquire) || self.eos.load(Ordering::Acquire) {
                 progress = Instant::now();

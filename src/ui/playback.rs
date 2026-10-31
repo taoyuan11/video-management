@@ -248,6 +248,167 @@ mod tests {
         assert!(app.error.is_none(), "{:?}", app.error);
     }
 
+    fn video_sink_pad(app: &App) -> gst::Pad {
+        app.player
+            .as_ref()
+            .unwrap()
+            .pipeline()
+            .property::<gst::Element>("video-sink")
+            .downcast::<gst::Bin>()
+            .unwrap()
+            .by_name("iced_video")
+            .unwrap()
+            .static_pad("sink")
+            .unwrap()
+    }
+
+    #[test]
+    fn delayed_seek_keeps_the_clicked_position_until_playback_catches_up() {
+        let (dir, mut app) = selection_app();
+        write_selection_video(&dir.path().join("sample.mp4"));
+        for paused in [false, true] {
+            let _ = app.update(Message::Select(false, 1));
+            wait_until_ready(&mut app);
+            if !paused {
+                let _ = app.update(Message::Pause);
+                wait_until_playing(&mut app);
+            }
+            let pad = video_sink_pad(&app);
+            let (entered, waiting) = mpsc::channel();
+            let (release, resume) = mpsc::channel::<()>();
+            let resume = std::sync::Mutex::new(resume);
+            let probe = pad
+                .add_probe(gst::PadProbeType::EVENT_UPSTREAM, move |_, info| {
+                    if info
+                        .event()
+                        .is_some_and(|event| event.type_() == gst::EventType::Seek)
+                    {
+                        let _ = entered.send(());
+                        let _ = resume.lock().unwrap().recv_timeout(Duration::from_secs(3));
+                    }
+                    gst::PadProbeReturn::Ok
+                })
+                .unwrap();
+
+            // Hold the native seek while real UI ticks read the cached position.
+            let mut positions = Vec::new();
+            for target in [2.0, 0.75, 3.0] {
+                let _ = app.update(Message::Seek(target));
+                let _ = app.update(Message::SeekRelease);
+                waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+                for _ in 0..5 {
+                    let _ = app.update(Message::Tick);
+                    positions.push((app.position, target));
+                    thread::sleep(Duration::from_millis(20));
+                }
+                release.send(()).unwrap();
+                wait_for(|| {
+                    let _ = app.update(Message::Tick);
+                    !app.player.as_ref().unwrap().is_seeking()
+                        && (app.position - target).abs() < 0.25
+                });
+                assert_eq!(app.player.as_ref().unwrap().paused(), paused);
+            }
+            drop(release);
+            pad.remove_probe(probe);
+            app.stop_player();
+            wait_for(|| app.playback_jobs.is_idle());
+            for (position, target) in positions {
+                assert_eq!(position, target, "old progress replaced the click");
+            }
+        }
+    }
+
+    #[test]
+    fn rapid_seek_keeps_the_latest_click_when_an_older_seek_finishes() {
+        let (dir, mut app) = selection_app();
+        write_selection_video(&dir.path().join("sample.mp4"));
+        let _ = app.update(Message::Select(false, 1));
+        wait_until_ready(&mut app);
+        let pad = video_sink_pad(&app);
+        let (entered, waiting) = mpsc::channel();
+        let (release, resume) = mpsc::channel::<()>();
+        let resume = std::sync::Mutex::new(resume);
+        let probe = pad
+            .add_probe(gst::PadProbeType::EVENT_UPSTREAM, move |_, info| {
+                if info
+                    .event()
+                    .is_some_and(|event| event.type_() == gst::EventType::Seek)
+                {
+                    let _ = entered.send(());
+                    let _ = resume.lock().unwrap().recv_timeout(Duration::from_secs(3));
+                }
+                gst::PadProbeReturn::Ok
+            })
+            .unwrap();
+        let _ = app.update(Message::Seek(2.0));
+        let _ = app.update(Message::SeekRelease);
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        // These two clicks coalesce while the first native seek is blocked.
+        for target in [1.5, 0.75] {
+            let _ = app.update(Message::Seek(target));
+            let _ = app.update(Message::SeekRelease);
+        }
+        release.send(()).unwrap();
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut positions = Vec::new();
+        for _ in 0..10 {
+            let _ = app.update(Message::Tick);
+            positions.push(app.position);
+            assert!(app.player.as_ref().unwrap().is_seeking());
+            thread::sleep(Duration::from_millis(20));
+        }
+        drop(release);
+        pad.remove_probe(probe);
+        wait_for(|| {
+            let _ = app.update(Message::Tick);
+            !app.player.as_ref().unwrap().is_seeking()
+        });
+        assert!((app.position - 0.75).abs() < 0.05);
+        assert!(app.player.as_ref().unwrap().paused());
+        app.stop_player();
+        wait_for(|| app.playback_jobs.is_idle());
+        assert_eq!(positions, vec![0.75; 10]);
+    }
+
+    #[test]
+    fn seek_waits_for_decoded_preroll_before_syncing_progress() {
+        let (dir, mut app) = selection_app();
+        write_selection_video(&dir.path().join("sample.mp4"));
+        let _ = app.update(Message::Select(false, 1));
+        wait_until_ready(&mut app);
+        let pad = video_sink_pad(&app);
+        let (entered, waiting) = mpsc::channel();
+        let (release, resume) = mpsc::channel::<()>();
+        let resume = std::sync::Mutex::new(resume);
+        let probe = pad
+            .add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+                let _ = entered.send(());
+                let _ = resume.lock().unwrap().recv_timeout(Duration::from_secs(3));
+                gst::PadProbeReturn::Ok
+            })
+            .unwrap();
+        let _ = app.update(Message::Seek(1.25));
+        let _ = app.update(Message::SeekRelease);
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        for _ in 0..10 {
+            let _ = app.update(Message::Tick);
+            assert_eq!(app.position, 1.25);
+            assert!(app.player.as_ref().unwrap().is_seeking());
+            thread::sleep(Duration::from_millis(20));
+        }
+        drop(release);
+        pad.remove_probe(probe);
+        wait_for(|| {
+            let _ = app.update(Message::Tick);
+            !app.player.as_ref().unwrap().is_seeking()
+        });
+        assert!((app.position - 1.25).abs() < 0.05);
+        assert!(app.player.as_ref().unwrap().paused());
+        app.stop_player();
+        wait_for(|| app.playback_jobs.is_idle());
+    }
+
     #[test]
     fn seeking_and_fullscreen_transitions_preserve_playback_and_volume() {
         let (dir, mut app) = selection_app();

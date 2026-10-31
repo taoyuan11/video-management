@@ -637,6 +637,7 @@ impl App {
                 }
                 if !self.dragging
                     && let Some(v) = &self.player
+                    && !v.is_seeking()
                 {
                     self.position = v.position().as_secs_f64();
                 }
@@ -1212,7 +1213,7 @@ impl App {
                 if self.dragging
                     && let Some(v) = &mut self.player
                 {
-                    if let Err(e) = v.seek(Duration::from_secs_f64(self.position.max(0.0)), false) {
+                    if let Err(e) = v.seek(Duration::from_secs_f64(self.position.max(0.0)), true) {
                         self.error = Some(format!("跳转失败：{e}"));
                     }
                     v.set_paused(!self.resume_after_seek);

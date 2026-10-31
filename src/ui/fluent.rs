@@ -158,8 +158,61 @@ pub const MEDIA_MUTED: Color = Color::from_rgb8(188, 197, 209);
 pub const MEDIA_ACCENT: Color = Color::from_rgb8(96, 205, 255);
 pub const MEDIA_TRACK: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.38);
 pub const MEDIA_FOCUS: Color = Color::from_rgba(0.12, 0.38, 0.55, 0.85);
-pub const MEDIA_CONTROL_SIZE: f32 = 32.0;
 pub const MEDIA_MIN_HEIGHT: f32 = 128.0;
+/// Matched visual and interaction dimensions for controls over imagery.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MediaMetrics {
+    pub padding: f32,
+    pub gap: f32,
+    pub button: f32,
+    pub icon: f32,
+    pub title_size: f32,
+    pub text_size: f32,
+    pub line_height: f32,
+    pub seek_height: f32,
+    pub rail_thickness: f32,
+    pub thumb_radius: f32,
+    pub rail_inset: f32,
+    pub popup_padding: f32,
+    pub popup_height: f32,
+    pub radius: f32,
+}
+
+impl MediaMetrics {
+    pub const REGULAR: Self = Self {
+        padding: 8.0,
+        gap: 4.0,
+        button: 32.0,
+        icon: 16.0,
+        title_size: 12.0,
+        text_size: 11.0,
+        line_height: 20.0,
+        seek_height: 24.0,
+        rail_thickness: 4.0,
+        thumb_radius: 5.0,
+        rail_inset: 6.0,
+        popup_padding: 8.0,
+        popup_height: 144.0,
+        radius: 8.0,
+    };
+
+    pub const MINI: Self = Self {
+        padding: 4.0,
+        gap: 2.0,
+        button: 24.0,
+        icon: 12.0,
+        title_size: 11.0,
+        text_size: 10.0,
+        line_height: 16.0,
+        seek_height: 16.0,
+        rail_thickness: 3.0,
+        thumb_radius: 4.0,
+        rail_inset: 4.0,
+        popup_padding: 6.0,
+        popup_height: 108.0,
+        radius: 4.0,
+    };
+}
 pub const PAGINATION_ITEM_SPACING: f32 = 4.0;
 pub const PAGINATION_GROUP_SPACING: f32 = 8.0;
 pub const TOOLBAR_CONTROL_PADDING: u16 = 10;
