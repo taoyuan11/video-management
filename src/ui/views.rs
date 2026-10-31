@@ -186,6 +186,9 @@ impl App {
                 ..Default::default()
             })
             .into();
+        // Keep the base at the same tree position when a modal opens or closes,
+        // so scroll offsets and other widget state survive the view diff.
+        let mut layers = stack![base];
         if let Some((owner, dialog)) = &self.dialog
             && (*owner == id || self.migration.busy())
         {
@@ -209,9 +212,9 @@ impl App {
                     background: Some(colors.scrim.into()),
                     ..Default::default()
                 });
-            return stack![base, widget::opaque(overlay)].into();
+            layers = layers.push(widget::opaque(overlay));
         }
-        base
+        layers.into()
     }
 
     fn workspace_header(&self, pending: bool, compact: bool) -> Element<'_, Message> {
@@ -1872,6 +1875,148 @@ mod tests {
         advanced::{Layout, Shell, clipboard, layout, mouse, renderer::Headless, widget::Tree},
         futures::FutureExt,
     };
+
+    #[test]
+    fn opening_switching_and_closing_dialogs_preserves_video_list_scroll() {
+        use iced::advanced::widget::{Operation, operation};
+
+        struct ListOffset {
+            id: widget::Id,
+            value: Option<f32>,
+        }
+        impl Operation for ListOffset {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn scrollable(
+                &mut self,
+                id: Option<&widget::Id>,
+                _: Rectangle,
+                _: Rectangle,
+                translation: iced::Vector,
+                _: &mut dyn operation::Scrollable,
+            ) {
+                if id == Some(&self.id) {
+                    self.value = Some(translation.y);
+                }
+            }
+        }
+
+        fn list_offset(
+            app: &App,
+            pending: bool,
+            size: Size,
+            renderer: &Renderer,
+            tree: &mut Tree,
+            scroll_to: Option<f32>,
+        ) -> f32 {
+            let owner = if pending {
+                app.pending.unwrap()
+            } else {
+                app.main
+            };
+            let mut view = app.view(owner);
+            tree.diff(&view);
+            let node =
+                view.as_widget_mut()
+                    .layout(tree, renderer, &layout::Limits::new(Size::ZERO, size));
+            let id = listing::scroll_id(pending).into();
+            if let Some(y) = scroll_to {
+                view.as_widget_mut().operate(
+                    tree,
+                    Layout::new(&node),
+                    renderer,
+                    &mut operation::scrollable::scroll_to::<()>(
+                        id,
+                        operation::scrollable::AbsoluteOffset {
+                            x: None,
+                            y: Some(y),
+                        },
+                    ),
+                );
+            }
+            let mut offset = ListOffset {
+                id: listing::scroll_id(pending).into(),
+                value: None,
+            };
+            view.as_widget_mut()
+                .operate(tree, Layout::new(&node), renderer, &mut offset);
+            offset.value.expect("video list must be scrollable")
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let (mut app, _) = App::boot(temp.path().to_path_buf(), None, None);
+        if let Some(mut service) = app.service.take() {
+            service.shutdown();
+        }
+        app.library_loading = false;
+        app.pending = Some(window::Id::unique());
+        let renderer = Renderer::new(iced::Font::DEFAULT, iced::Pixels(14.0), Some("tiny-skia"))
+            .now_or_never()
+            .flatten()
+            .expect("headless software renderer");
+
+        for pending in [false, true] {
+            app.snapshot.videos = (1..=60)
+                .map(|id| VideoItem {
+                    id,
+                    hash: format!("{id:064x}"),
+                    title: format!("测试视频 {id}.mp4"),
+                    tag_ids: vec![],
+                    library: !pending,
+                    created_at: id,
+                    duration_ms: None,
+                    files: vec![VideoFile {
+                        id,
+                        video_id: id,
+                        path: temp.path().join(format!("{id}.mp4")),
+                        size: 10,
+                        modified: 100,
+                        state: if pending {
+                            FileState::Pending
+                        } else {
+                            FileState::Managed
+                        },
+                        availability: Availability::Present,
+                    }],
+                })
+                .collect();
+            let owner = if pending {
+                app.pending.unwrap()
+            } else {
+                app.main
+            };
+            let minimum = if pending {
+                Size::new(960.0, 650.0)
+            } else {
+                Size::new(1060.0, 700.0)
+            };
+            for size in [minimum, Size::new(1380.0, 860.0)] {
+                app.dialog = None;
+                let mut tree = Tree::empty();
+                let offset = list_offset(&app, pending, size, &renderer, &mut tree, Some(240.0));
+                assert_eq!(offset, 240.0);
+
+                // Keep the same widget tree, just as the runtime does between views.
+                // Reopen after closing to catch resets in both directions.
+                for dialog in [
+                    Some(Dialog::Roots),
+                    Some(Dialog::Tag(None)),
+                    None,
+                    Some(Dialog::Updates),
+                    None,
+                ] {
+                    app.dialog = dialog.map(|dialog| (owner, dialog));
+                    assert_eq!(
+                        list_offset(&app, pending, size, &renderer, &mut tree, None),
+                        offset,
+                        "pending={pending}, size={size:?}, dialog={:?}",
+                        app.dialog,
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn pending_rows_receive_clicks_while_the_main_roots_dialog_is_open() {
