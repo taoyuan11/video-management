@@ -22,8 +22,9 @@ fn modified_cell(video: &VideoItem, pending: bool, colors: Palette) -> Element<'
 
 fn page_arrow(glyph: char, message: Option<Message>) -> Element<'static, Message> {
     button(button_icon(glyph, 12))
-        .style(quiet)
-        .padding([6, 8])
+        .style(secondary)
+        .padding(6)
+        .width(PAGINATION_CONTROL_SIZE)
         .on_press_maybe(message)
         .into()
 }
@@ -661,7 +662,10 @@ impl App {
         }
         content = content
             .push(widget::rule::horizontal(1).style(separator))
-            .push(self.pagination_footer(pending, total));
+            .push(
+                widget::responsive(move |size| self.pagination_footer(pending, total, size.width))
+                    .height(PAGINATION_CONTROL_SIZE + 16.0),
+            );
         container(content)
             .width(Fill)
             .height(Fill)
@@ -698,7 +702,7 @@ impl App {
         .into()
     }
 
-    fn pagination_footer(&self, pending: bool, total: usize) -> Element<'_, Message> {
+    fn pagination_footer(&self, pending: bool, total: usize, width: f32) -> Element<'_, Message> {
         let pane = self.pane(pending);
         let colors = self.colors();
         let pagination = pane.pagination(total);
@@ -708,22 +712,38 @@ impl App {
         let previous = enabled && page > 0;
         let next = enabled && page + 1 < pages;
         let target = pane.jump_target(total);
-        let invalid = pane.page_input.is_some() && target.is_none();
+        let invalid = pane.page_input.as_ref().is_some_and(|s| !s.is_empty()) && target.is_none();
         let summary = if invalid {
-            format!("请输入 1–{pages} 之间的页码")
-        } else if total == 0 {
-            "共 0 个视频".into()
+            "页码无效".into()
         } else {
-            format!(
-                "{}–{} / 共 {total} 个",
-                pagination.start + 1,
-                pagination.end
-            )
+            format!("共 {total} 个")
         };
-        let page_text = pane
-            .page_input
-            .clone()
-            .unwrap_or_else(|| (page + 1).to_string());
+        // Reserve space for every group before choosing a page-number window.
+        // At the minimum list width, the input becomes the simple current/total
+        // pager, so the footer stays one control high even with details open.
+        let digits = pages.to_string().len() as f32;
+        let number_width = (digits * 8.0 + 16.0).max(PAGINATION_CONTROL_SIZE);
+        let input_width = (digits * 8.0 + 16.0).max(56.0);
+        let summary_width = (total.to_string().len() as f32 * 8.0 + 40.0).max(56.0);
+        let selector_width = 108.0;
+        let jumper_width = 36.0 + input_width + PAGINATION_ITEM_SPACING * 2.0;
+        let reserved_width =
+            32.0 + summary_width + selector_width + jumper_width + PAGINATION_GROUP_SPACING * 3.0;
+        let items = [false, true].into_iter().find_map(|fewer| {
+            let items = pagination.items(fewer);
+            let navigation_width = PAGINATION_CONTROL_SIZE * 2.0
+                + items.len() as f32 * number_width
+                + (items.len() + 1) as f32 * PAGINATION_ITEM_SPACING;
+            (reserved_width + navigation_width <= width).then_some(items)
+        });
+        let simple = items.is_none();
+        let page_text = pane.page_input.clone().unwrap_or_else(|| {
+            if simple {
+                (page + 1).to_string()
+            } else {
+                String::new()
+            }
+        });
         let jump = (enabled && target.is_some_and(|target| target != page))
             .then_some(Message::JumpPage(pending));
         let input = text_input("页码", &page_text)
@@ -733,66 +753,101 @@ impl App {
                 "library-page"
             })
             .on_input_maybe(enabled.then_some(move |value| Message::PageInput(pending, value)))
-            .on_submit_maybe(jump.clone())
+            .on_submit_maybe(jump)
             .size(12)
+            .line_height(iced::Pixels(BUTTON_CONTENT_HEIGHT))
             .padding([6, 8])
-            .width(56)
-            .style(input);
-        let navigation = row![
-            button(button_text("首页").size(12))
-                .padding([6, 8])
-                .style(quiet)
-                .on_press_maybe(previous.then_some(Message::Page(pending, 0))),
-            page_arrow(
-                '\u{E76B}',
-                previous.then_some(Message::Page(pending, page.saturating_sub(1)))
-            ),
-            space::horizontal(),
-            text("第").size(12).color(colors.muted),
-            widget::tooltip(
-                input,
-                "输入页码，按 Enter 跳转",
-                widget::tooltip::Position::Top
-            )
-            .style(panel)
-            .padding(8),
-            text(format!("/ {pages} 页")).size(12).color(colors.muted),
-            button(button_text("跳转").size(12))
-                .padding([6, 8])
-                .style(quiet)
-                .on_press_maybe(jump),
-            space::horizontal(),
-            page_arrow('\u{E76C}', next.then_some(Message::Page(pending, page + 1))),
-            button(button_text("末页").size(12))
-                .padding([6, 8])
-                .style(quiet)
-                .on_press_maybe(next.then_some(Message::Page(pending, pages - 1))),
-        ]
-        .spacing(4)
-        .align_y(Alignment::Center);
-        container(
-            column![
-                row![
-                    text(summary)
-                        .size(12)
-                        .color(if invalid { colors.danger } else { colors.muted })
-                        .width(Fill),
-                    pick_list(PageSize::ALL, Some(pane.page_size), move |size| {
-                        Message::PageSize(pending, size)
-                    })
-                    .style(select)
-                    .menu_style(menu)
-                    .text_size(12)
-                    .padding([5, 8]),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-                navigation,
-            ]
-            .spacing(6),
+            .width(input_width)
+            .style(move |theme, status| page_input(theme, status, invalid));
+        let input = widget::tooltip(
+            input,
+            text(format!("输入 1–{pages}，按 Enter 跳转")).size(12),
+            widget::tooltip::Position::Top,
         )
-        .padding([8, 16])
-        .into()
+        .style(panel)
+        .padding(8);
+        let mut navigation = row![page_arrow(
+            '\u{E76B}',
+            previous.then_some(Message::Page(pending, page.saturating_sub(1)))
+        )]
+        .spacing(PAGINATION_ITEM_SPACING)
+        .align_y(Alignment::Center);
+        if let Some(items) = items {
+            for item in items {
+                let (content, target, active): (Element<_>, _, _) = match item {
+                    listing::PageItem::Page(target) => (
+                        button_text((target + 1).to_string()).size(12).into(),
+                        target,
+                        target == page,
+                    ),
+                    listing::PageItem::JumpPrevious(target)
+                    | listing::PageItem::JumpNext(target) => {
+                        (button_icon(MORE, 12).into(), target, false)
+                    }
+                };
+                navigation = navigation.push(
+                    button(content)
+                        .padding(6)
+                        .width(number_width)
+                        .style(move |theme, status| page_button(theme, active, status))
+                        .on_press_maybe(enabled.then_some(Message::Page(pending, target))),
+                );
+            }
+        }
+        let jumper: Element<_> = if simple {
+            row![
+                input,
+                text(format!("/ {pages} 页"))
+                    .size(12)
+                    .color(colors.muted)
+                    .wrapping(text::Wrapping::None)
+            ]
+            .spacing(PAGINATION_ITEM_SPACING)
+            .align_y(Alignment::Center)
+            .into()
+        } else {
+            row![
+                text("跳至").size(12).color(colors.muted),
+                input,
+                text("页").size(12).color(colors.muted)
+            ]
+            .spacing(PAGINATION_ITEM_SPACING)
+            .align_y(Alignment::Center)
+            .into()
+        };
+        let quick_jump = if simple {
+            navigation = navigation.push(jumper);
+            None
+        } else {
+            Some(jumper)
+        };
+        navigation = navigation.push(page_arrow(
+            '\u{E76C}',
+            next.then_some(Message::Page(pending, page + 1)),
+        ));
+        let mut footer = row![
+            text(summary)
+                .size(12)
+                .color(if invalid { colors.danger } else { colors.muted })
+                .wrapping(text::Wrapping::None)
+                .width(Fill),
+            navigation,
+            pick_list(PageSize::ALL, Some(pane.page_size), move |size| {
+                Message::PageSize(pending, size)
+            })
+            .style(select)
+            .menu_style(menu)
+            .text_size(12)
+            .text_line_height(iced::Pixels(BUTTON_CONTENT_HEIGHT))
+            .width(selector_width)
+            .padding([6, 8]),
+        ]
+        .spacing(PAGINATION_GROUP_SPACING)
+        .align_y(Alignment::Center);
+        if let Some(jumper) = quick_jump {
+            footer = footer.push(jumper);
+        }
+        container(footer).padding([8, 16]).into()
     }
 
     fn empty_state(&self, pending: bool) -> Element<'_, Message> {

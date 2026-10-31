@@ -147,6 +147,9 @@ pub const DETAILS_MAX_WIDTH: f32 = 640.0;
 pub const DETAILS_RESIZE_WIDTH: f32 = 16.0;
 pub const LIBRARY_MIN_WIDTH: f32 = 480.0;
 pub const BUTTON_CONTENT_HEIGHT: f32 = 20.0;
+pub const PAGINATION_CONTROL_SIZE: f32 = 32.0;
+pub const PAGINATION_ITEM_SPACING: f32 = 4.0;
+pub const PAGINATION_GROUP_SPACING: f32 = 8.0;
 pub const TOOLBAR_CONTROL_PADDING: u16 = 10;
 pub const HEADER_COMPACT_WIDTH: f32 = 960.0;
 
@@ -322,6 +325,28 @@ pub fn sort_header(theme: &Theme, active: bool, status: button::Status) -> butto
     let mut style = item(theme, active, status);
     if active && status != button::Status::Disabled {
         style.text_color = palette(theme).accent;
+    }
+    style
+}
+
+pub fn page_button(theme: &Theme, active: bool, status: button::Status) -> button::Style {
+    let mut style = secondary(theme, status);
+    if active {
+        if status == button::Status::Active {
+            style.background = Some(palette(theme).tint.into());
+        }
+        if status != button::Status::Disabled {
+            style.text_color = palette(theme).accent;
+            style.border.color = palette(theme).accent;
+        }
+    }
+    style
+}
+
+pub fn page_input(theme: &Theme, status: text_input::Status, invalid: bool) -> text_input::Style {
+    let mut style = input(theme, status);
+    if invalid {
+        style.border.color = palette(theme).danger;
     }
     style
 }

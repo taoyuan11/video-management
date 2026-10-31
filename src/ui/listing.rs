@@ -115,6 +115,13 @@ pub struct Pagination {
     pub end: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageItem {
+    Page(usize),
+    JumpPrevious(usize),
+    JumpNext(usize),
+}
+
 impl Pagination {
     fn new(page: usize, page_size: PageSize, total: usize) -> Self {
         let size = page_size.count();
@@ -131,6 +138,43 @@ impl Pagination {
 
     pub fn range(&self) -> Range<usize> {
         self.start..self.end
+    }
+
+    pub fn items(&self, fewer: bool) -> Vec<PageItem> {
+        let neighbors = if fewer { 1 } else { 2 };
+        let span = neighbors * 2 + 1;
+        if self.pages <= span + 2 {
+            return (0..self.pages).map(PageItem::Page).collect();
+        }
+
+        // Keep a bounded window around the current page, with the first and
+        // last pages always reachable. Ellipses move by 3 or 5 pages, as in
+        // Ant Design's showLessItems/default pagination.
+        let start = self.page.saturating_sub(neighbors).min(self.pages - span);
+        let end = start + span;
+        let mut items = Vec::with_capacity(span + 4);
+        if start > 0 {
+            items.push(PageItem::Page(0));
+            if start == 2 {
+                items.push(PageItem::Page(1));
+            } else if start > 2 {
+                items.push(PageItem::JumpPrevious(self.page.saturating_sub(span)));
+            }
+        }
+        items.extend((start..end).map(PageItem::Page));
+        if end < self.pages - 1 {
+            if end == self.pages - 2 {
+                items.push(PageItem::Page(end));
+            } else {
+                items.push(PageItem::JumpNext(
+                    self.page.saturating_add(span).min(self.pages - 1),
+                ));
+            }
+        }
+        if end < self.pages {
+            items.push(PageItem::Page(self.pages - 1));
+        }
+        items
     }
 }
 
@@ -421,6 +465,102 @@ mod tests {
         assert_eq!(pane.page, 0);
         assert_eq!(pane.page_input, None);
         assert_eq!(pane.pagination(135).page, 0);
+    }
+
+    #[test]
+    fn numbered_pages_show_edges_and_jump_across_omitted_pages() {
+        use PageItem::{JumpNext, JumpPrevious, Page};
+        for fewer in [false, true] {
+            assert_eq!(
+                Pagination::new(0, PageSize::Twenty, 0).items(fewer),
+                [Page(0)]
+            );
+            assert_eq!(
+                Pagination::new(1, PageSize::Twenty, 60).items(fewer),
+                [Page(0), Page(1), Page(2)]
+            );
+        }
+        assert_eq!(
+            Pagination::new(0, PageSize::Twenty, 400).items(false),
+            [
+                Page(0),
+                Page(1),
+                Page(2),
+                Page(3),
+                Page(4),
+                JumpNext(5),
+                Page(19)
+            ]
+        );
+        assert_eq!(
+            Pagination::new(9, PageSize::Twenty, 400).items(false),
+            [
+                Page(0),
+                JumpPrevious(4),
+                Page(7),
+                Page(8),
+                Page(9),
+                Page(10),
+                Page(11),
+                JumpNext(14),
+                Page(19)
+            ]
+        );
+        assert_eq!(
+            Pagination::new(19, PageSize::Twenty, 400).items(false),
+            [
+                Page(0),
+                JumpPrevious(14),
+                Page(15),
+                Page(16),
+                Page(17),
+                Page(18),
+                Page(19)
+            ]
+        );
+        assert_eq!(
+            Pagination::new(9, PageSize::Twenty, 400).items(true),
+            [
+                Page(0),
+                JumpPrevious(6),
+                Page(8),
+                Page(9),
+                Page(10),
+                JumpNext(12),
+                Page(19)
+            ]
+        );
+    }
+
+    #[test]
+    fn numbered_page_windows_stay_bounded_and_keep_current_and_endpoints() {
+        for fewer in [false, true] {
+            for total in [0, 20, 100, 140, 160, 200, 400, usize::MAX] {
+                let pages = Pagination::new(0, PageSize::Twenty, total).pages;
+                for requested in (0..pages.min(20)).chain([pages / 2, pages - 1, usize::MAX]) {
+                    let pagination = Pagination::new(requested, PageSize::Twenty, total);
+                    let items = pagination.items(fewer);
+                    assert!(items.len() <= if fewer { 7 } else { 9 });
+                    assert_eq!(items.first(), Some(&PageItem::Page(0)));
+                    assert_eq!(items.last(), Some(&PageItem::Page(pages - 1)));
+                    assert!(items.contains(&PageItem::Page(pagination.page)));
+                    let mut last_page = None;
+                    for item in items {
+                        match item {
+                            PageItem::Page(page) => {
+                                assert!(page < pages);
+                                assert!(last_page.is_none_or(|last| last < page));
+                                last_page = Some(page);
+                            }
+                            PageItem::JumpPrevious(target) => assert!(target < pagination.page),
+                            PageItem::JumpNext(target) => {
+                                assert!(target > pagination.page && target < pages);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
