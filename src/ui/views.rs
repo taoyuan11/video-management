@@ -912,17 +912,19 @@ impl App {
                 names.join("、")
             };
 
-            let video_info_column = column![
-                        detail_row(self.colors(), "文件类型", &extension(v)),
-                        detail_row(self.colors(), "文件大小", &bytes_label(v.size())),
-                        detail_row(self.colors(), "标签", &tags),
-                    ]
-                .spacing(12);
+            let mut video_info_column = column![
+                detail_row(self.colors(), "文件类型", &extension(v)),
+                detail_row(self.colors(), "文件大小", &bytes_label(v.size())),
+                detail_row(self.colors(), "标签", &tags),
+            ]
+            .spacing(12);
 
             if v.files.len() > 1 {
-                video_info_column.push(
-                   detail_row(self.colors(), "文件位置", &format!("{} 个", v.files.len()))
-               );
+                video_info_column = video_info_column.push(detail_row(
+                    self.colors(),
+                    "文件位置",
+                    &format!("{} 个", v.files.len()),
+                ));
             }
 
             content = content
@@ -952,12 +954,12 @@ impl App {
                                     )),
                                 space::horizontal(),
                                 button(label(FOLDER, "在资源管理器打开"))
-                                .style(quiet)
-                                .padding(6)
-                                .on_press_maybe(
-                                    (file.availability == Availability::Present)
-                                        .then(|| Message::OpenInExplorer(file.path.clone()))
-                                ),
+                                    .style(quiet)
+                                    .padding(6)
+                                    .on_press_maybe(
+                                        (file.availability == Availability::Present)
+                                            .then(|| Message::OpenInExplorer(file.path.clone()))
+                                    ),
                             ]
                             .align_y(Alignment::Center)
                         ]
