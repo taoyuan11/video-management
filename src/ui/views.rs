@@ -1061,74 +1061,39 @@ impl App {
             .into()
     }
 
-    fn cover_preview(
+    fn unloaded_player(
         &self,
         video: &VideoItem,
         pending: bool,
         id: window::Id,
     ) -> Element<'_, Message> {
         let colors = self.colors();
-        let playable = video.files.iter().find(|f| {
-            f.availability == Availability::Present
-                && f.state
-                    == if pending {
-                        FileState::Pending
+        let playable = self.preview_file(pending, video.id);
+        column![
+            container(
+                column![
+                    icon(VIDEO, 24).color(colors.muted),
+                    text(if playable.is_some() {
+                        "点击下方播放按钮加载视频"
                     } else {
-                        FileState::Managed
-                    }
-        });
-        let play = button(label(PLAY, "播放"))
-            .style(primary)
-            .padding([8, 12])
-            .on_press_maybe(playable.map(|f| Message::Play(f.id, id)));
-        let content: Element<_> = match self.covers.state(&video.hash) {
-            Some(covers::State::Ready(handle)) => stack![
-                widget::image(handle.clone())
-                    .width(Fill)
-                    .height(170)
-                    .content_fit(iced::ContentFit::Contain),
-                container(column![space::vertical(), play].align_x(Alignment::Center))
-                    .padding(8)
-                    .width(Fill)
-                    .height(170),
-            ]
-            .into(),
-            state => {
-                let loading = !matches!(state, Some(covers::State::Unavailable));
-                let symbol: Element<_> = if loading {
-                    motion::spinner(24.0)
-                } else {
-                    icon(VIDEO, 24).color(colors.muted).into()
-                };
-                container(
-                    column![
-                        symbol,
-                        text(if loading {
-                            "正在生成封面…"
-                        } else {
-                            "暂无封面"
-                        })
-                        .size(12)
-                        .color(colors.muted),
-                        play
-                    ]
-                    .spacing(12)
-                    .align_x(Alignment::Center),
-                )
-                .center_x(Fill)
-                .center_y(170)
-                .into()
-            }
-        };
-        container(content)
-            .width(Fill)
-            .height(170)
-            .style(move |_| container::Style {
-                background: Some(colors.backdrop.into()),
-                border: iced::border::rounded(8),
-                ..Default::default()
-            })
-            .into()
+                        "文件不可用，请检查存储位置"
+                    })
+                    .size(12)
+                    .color(colors.muted),
+                ]
+                .spacing(12)
+                .align_x(Alignment::Center),
+            )
+            .center_x(Fill)
+            .center_y(170)
+            .style(inset),
+            button(button_icon(PLAY, 16))
+                .style(secondary)
+                .padding(8)
+                .on_press_maybe(playable.map(|file| Message::Play(file, id))),
+        ]
+        .spacing(12)
+        .into()
     }
 
     fn player_view(&self, id: window::Id, full: bool) -> Element<'_, Message> {
@@ -1140,7 +1105,7 @@ impl App {
                 .focus
                 .and_then(|focus| self.snapshot.videos.iter().find(|v| v.id == focus))
             {
-                return self.cover_preview(video, pending, id);
+                return self.unloaded_player(video, pending, id);
             }
             return container(
                 column![
@@ -1153,7 +1118,7 @@ impl App {
                             ..Default::default()
                         }),
                     text("视频预览").size(13).color(colors.muted),
-                    text("点击播放，在这里观看").size(11).color(colors.muted),
+                    text("选择视频后，在这里观看").size(11).color(colors.muted),
                 ]
                 .spacing(10)
                 .align_x(Alignment::Center),

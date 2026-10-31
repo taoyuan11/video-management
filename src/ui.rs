@@ -137,6 +137,7 @@ pub enum Message {
     CheckUpdate,
     InstallUpdate,
     RemoveRoot(PathBuf),
+    Preview(i64, window::Id),
     Play(i64, window::Id),
     Pause,
     Seek(f64),
@@ -558,12 +559,15 @@ impl App {
                 if self.loader.as_ref().is_some_and(|l| l.is_finished())
                     && let Some(loader) = self.loader.take()
                 {
+                    let autoplay = loader.autoplay;
                     match loader.finish() {
                         Ok(mut video) => {
                             video.set_volume(self.settings.volume);
                             video.set_muted(self.settings.muted);
                             video.set_paused(
-                                self.page != MainPage::Library && self.player_window == self.main,
+                                !autoplay
+                                    || (self.page != MainPage::Library
+                                        && self.player_window == self.main),
                             );
                             self.player = Some(video);
                         }
@@ -743,35 +747,21 @@ impl App {
                 let video = self.snapshot.videos.iter().find(|v| v.id == id);
                 // Compare the playing video, not the detail focus: filtering
                 // and clearing selection can remove focus while playback stays.
-                let switch_playback = (self.player.is_some() || self.loader.is_some())
-                    && (self.player_window != owner
-                        || !video.is_some_and(|v| {
-                            v.files.iter().any(|f| Some(f.id) == self.playing_file)
-                        }));
-                let playable = video.and_then(|v| {
-                    v.files
-                        .iter()
-                        .find(|f| {
-                            f.availability == Availability::Present
-                                && f.state
-                                    == if p {
-                                        FileState::Pending
-                                    } else {
-                                        FileState::Managed
-                                    }
-                        })
-                        .map(|f| f.id)
-                });
+                let needs_preview = (self.player.is_none() && self.loader.is_none())
+                    || self.player_window != owner
+                    || !video
+                        .is_some_and(|v| v.files.iter().any(|f| Some(f.id) == self.playing_file));
+                let playable = self.preview_file(p, id);
                 if self.pane(p).selected.is_empty() && self.pane(p).focus != Some(id) {
                     self.pane_mut(p).tag_draft.clear();
                 }
                 self.pane_mut(p).focus = Some(id);
                 self.details_visible[usize::from(p)] = true;
-                if switch_playback {
-                    self.stop_player();
+                if needs_preview {
                     if let Some(file) = playable {
-                        return self.update(Message::Play(file, owner));
+                        return self.update(Message::Preview(file, owner));
                     }
+                    self.stop_player();
                 }
             }
             Message::Check(p, id, on) => {
@@ -1080,7 +1070,8 @@ impl App {
             Message::InstallUpdate => self.install_update(),
             Message::ShowRoots => self.dialog = Some((self.main, Dialog::Roots)),
             Message::RemoveRoot(p) => self.send(Command::RemoveRoot(p)),
-            Message::Play(id, owner) => {
+            Message::Preview(id, owner) | Message::Play(id, owner) => {
+                let autoplay = matches!(message, Message::Play(..));
                 if self
                     .pending_trash
                     .as_ref()
@@ -1116,7 +1107,7 @@ impl App {
                     self.playing_file = Some(id);
                     self.player_title = title;
                     self.player_window = owner;
-                    match playback::Load::start(path) {
+                    match playback::Load::start(path, autoplay) {
                         Ok(load) => self.loader = Some(load),
                         Err(error) => {
                             self.playing_file = None;
@@ -1204,6 +1195,10 @@ impl App {
                 let owner = if p { self.pending } else { Some(self.main) };
                 if !self.details_visible[usize::from(p)] && owner == Some(self.player_window) {
                     self.stop_player();
+                } else if self.details_visible[usize::from(p)]
+                    && let Some(focus) = self.pane(p).focus
+                {
+                    return self.update(Message::Select(p, focus));
                 }
             }
             Message::ResizeDetails(p, width) => {

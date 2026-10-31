@@ -127,7 +127,7 @@ impl Covers {
                 requests.push(entry.request.clone());
             }
         }
-        // Visible covers are pinned (at most two 60-item pages and two details).
+        // Visible covers are pinned (at most two 60-item pages).
         // Bound inactive image bytes too, rather than retaining 128 large images
         // after a user switches to a smaller page or closes the second window.
         let mut bytes: usize = self.entries.values().map(|entry| entry.bytes).sum();
@@ -173,19 +173,6 @@ impl App {
             return;
         }
         let mut videos = Vec::new();
-        for pending in [false, true] {
-            if (pending && self.pending.is_none()) || (!pending && self.page != MainPage::Library) {
-                continue;
-            }
-            if self.details_visible[usize::from(pending)]
-                && let Some(video) = self
-                    .pane(pending)
-                    .focus
-                    .and_then(|id| self.snapshot.videos.iter().find(|v| v.id == id))
-            {
-                videos.push(video);
-            }
-        }
         for pending in [false, true] {
             if (pending && self.pending.is_none()) || (!pending && self.page != MainPage::Library) {
                 continue;

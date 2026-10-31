@@ -16,20 +16,23 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_JOBS: usize = 4;
 
 pub(super) struct Load {
+    pub autoplay: bool,
     cancel: Arc<AtomicBool>,
     worker: JoinHandle<Result<Video, String>>,
     started: Instant,
 }
 
 impl Load {
-    pub fn start(path: PathBuf) -> std::io::Result<Self> {
-        Self::spawn(move |cancel| {
+    pub fn start(path: PathBuf, autoplay: bool) -> std::io::Result<Self> {
+        let mut load = Self::spawn(move |cancel| {
             let uri = video_management::media::file_uri(&path).map_err(|e| e.to_string())?;
             // No preliminary is_file(): it duplicates potentially blocking NAS
             // I/O. Let the source report the actual open/read error instead.
             Video::new_cancellable(&uri, &cancel, true)
                 .map_err(|e| format!("无法播放 {}：{e}", path.display()))
-        })
+        })?;
+        load.autoplay = autoplay;
+        Ok(load)
     }
 
     fn spawn(
@@ -41,6 +44,7 @@ impl Load {
             .name("video-load".into())
             .spawn(move || load(token))?;
         Ok(Self {
+            autoplay: false,
             cancel,
             worker,
             started: Instant::now(),
@@ -62,6 +66,28 @@ impl Load {
         self.worker
             .join()
             .unwrap_or_else(|_| Err("播放组件未能加载此文件".into()))
+    }
+}
+
+impl super::App {
+    pub(super) fn preview_file(&self, pending: bool, video_id: i64) -> Option<i64> {
+        use video_management::model::{Availability, FileState};
+        self.snapshot
+            .videos
+            .iter()
+            .find(|video| video.id == video_id)?
+            .files
+            .iter()
+            .find(|file| {
+                file.availability == Availability::Present
+                    && file.state
+                        == if pending {
+                            FileState::Pending
+                        } else {
+                            FileState::Managed
+                        }
+            })
+            .map(|file| file.id)
     }
 }
 
@@ -131,7 +157,7 @@ mod tests {
     use super::*;
     use crate::ui::{App, Message};
     use gstreamer::{self as gst, prelude::*};
-    use std::sync::mpsc;
+    use std::{os::windows::fs::OpenOptionsExt, sync::mpsc};
     use video_management::model::{Availability, FileState, VideoFile, VideoItem};
 
     fn wait_for(mut condition: impl FnMut() -> bool) {
@@ -210,6 +236,57 @@ mod tests {
         assert!(app.error.is_none(), "{:?}", app.error);
     }
 
+    fn wait_until_ready(app: &mut App) {
+        wait_for(|| {
+            let _ = app.update(Message::Tick);
+            app.player.is_some()
+        });
+        let video = app.player.as_ref().unwrap();
+        assert!(video.paused());
+        assert_eq!(video.pipeline().current_state(), gst::State::Paused);
+        assert!(video.position() < Duration::from_millis(50));
+        assert!(app.error.is_none(), "{:?}", app.error);
+    }
+
+    #[test]
+    fn selecting_a_video_loads_paused_and_the_player_button_starts_playback() {
+        let (dir, mut app) = selection_app();
+        write_selection_video(&dir.path().join("sample.mp4"));
+        for pending in [false, true] {
+            app.details_visible[usize::from(pending)] = false;
+            let _ = app.update(Message::Select(pending, 1));
+            assert!(app.details_visible[usize::from(pending)]);
+            assert_eq!(app.playing_file, Some(if pending { 12 } else { 11 }));
+            assert!(app.loader.is_some());
+            wait_until_ready(&mut app);
+
+            // Repeated ticks must not start the paused preview in the background.
+            thread::sleep(Duration::from_millis(150));
+            wait_until_ready(&mut app);
+            let _ = app.update(Message::Pause);
+            wait_until_playing(&mut app);
+
+            let _ = app.update(Message::ToggleDetails(pending));
+            wait_for(|| app.playback_jobs.is_idle());
+            let _ = app.update(Message::ToggleDetails(pending));
+            wait_until_ready(&mut app);
+            let _ = app.update(Message::Stop);
+            wait_for(|| app.playback_jobs.is_idle());
+            assert!(app.player.is_none());
+            assert!(app.loader.is_none());
+            // Selecting the same row after stopping prepares it again.
+            let _ = app.update(Message::Select(pending, 1));
+            wait_until_ready(&mut app);
+            app.stop_player();
+            wait_for(|| app.playback_jobs.is_idle());
+        }
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(dir.path().join("sample.mp4"))
+            .expect("preview retained the file after stopping");
+    }
+
     #[test]
     fn selecting_another_row_replaces_playing_or_paused_video_in_either_window() {
         let (dir, mut app) = selection_app();
@@ -247,7 +324,7 @@ mod tests {
                 assert!(app.loader.is_some());
                 assert_eq!(app.position, 0.0);
                 wait_for(|| previous.current_state() == gst::State::Null);
-                wait_until_playing(&mut app);
+                wait_until_ready(&mut app);
                 app.stop_player();
                 wait_for(|| app.playback_jobs.is_idle());
             }
@@ -255,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn rapid_row_changes_cancel_old_loads_and_play_only_the_latest_selection() {
+    fn rapid_row_changes_cancel_old_loads_and_prepare_only_the_latest_selection() {
         let (dir, mut app) = selection_app();
         write_selection_video(&dir.path().join("sample.mp4"));
         let (release, resume) = mpsc::channel::<()>();
@@ -279,7 +356,7 @@ mod tests {
         assert_eq!(app.playing_file, Some(32));
         assert_eq!(app.player_window, app.pending.unwrap());
         drop(release);
-        wait_until_playing(&mut app);
+        wait_until_ready(&mut app);
         assert_eq!(app.playing_file, Some(32));
         app.stop_player();
         wait_for(|| app.playback_jobs.is_idle());
@@ -312,16 +389,10 @@ mod tests {
     }
 
     #[test]
-    fn idle_rows_show_details_and_missing_rows_cancel_previous_playback() {
+    fn missing_rows_cancel_previous_playback_without_loading_a_preview() {
         for pending in [false, true] {
             let (_dir, mut app) = selection_app();
             app.details_visible[usize::from(pending)] = false;
-            let _ = app.update(Message::Select(pending, 1));
-            assert_eq!(app.pane(pending).focus, Some(1));
-            assert!(app.details_visible[usize::from(pending)]);
-            assert!(app.player.is_none());
-            assert!(app.loader.is_none());
-
             let (release, resume) = mpsc::channel::<()>();
             let load = Load::spawn(move |_| {
                 let _ = resume.recv();
@@ -336,6 +407,7 @@ mod tests {
             }
             let _ = app.update(Message::Select(pending, 2));
             assert_eq!(app.pane(pending).focus, Some(2));
+            assert!(app.details_visible[usize::from(pending)]);
             assert!(token.load(Ordering::Acquire));
             assert!(app.playing_file.is_none());
             assert!(app.loader.is_none());
@@ -343,6 +415,9 @@ mod tests {
             wait_for(|| app.playback_jobs.is_idle());
             let _ = app.update(Message::Tick);
             assert!(app.error.is_none());
+            let _ = app.update(Message::Select(pending, 2));
+            assert!(app.player.is_none());
+            assert!(app.loader.is_none());
         }
     }
 
