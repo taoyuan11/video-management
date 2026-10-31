@@ -141,7 +141,6 @@ impl App {
                 TagAction::Import => unreachable!(),
             };
             self.send(Command::Assign(picker.ids, assignment, false));
-            self.clear_tag_selection(false);
         }
     }
 
@@ -769,6 +768,7 @@ mod tests {
     fn batch_picker_starts_empty_cancel_discards_and_remove_uses_union() {
         let (_temp, mut app) = app();
         app.main_pane.selected.extend([1, 2]);
+        app.main_pane.focus = Some(2);
         let _ = app.update(Message::PickTags(TagAction::Add));
         assert!(picker(&app).selected.is_empty());
         assert_eq!(picker(&app).choices(&app.snapshot).len(), 4);
@@ -793,8 +793,8 @@ mod tests {
         let _ = app.update(Message::TagCheck(2, true));
         let _ = app.update(Message::SaveTagSelection);
         assert!(app.dialog.is_none());
-        assert!(app.main_pane.selected.is_empty());
-        assert!(app.main_pane.focus.is_none());
+        assert_eq!(app.main_pane.selected, BTreeSet::from([1, 2]));
+        assert_eq!(app.main_pane.focus, Some(2));
     }
 
     #[test]
@@ -836,9 +836,19 @@ mod tests {
         let _ = app.update(Message::Page(false, 3));
         let _ = app.update(Message::Check(false, 1, true));
         let _ = app.update(Message::Sort(false, Sort::Name));
-        let _ = app.update(Message::PickTags(TagAction::Add));
-        assert_eq!(picker(&app).ids, vec![1, 65]);
-        let _ = app.update(Message::Dismiss);
+        let _ = app.update(Message::Page(false, 3));
+        app.main_pane.focus = Some(1);
+        for (action, tag) in [(TagAction::Add, 2), (TagAction::Remove, 1)] {
+            let _ = app.update(Message::PickTags(action));
+            assert_eq!(picker(&app).ids, vec![1, 65]);
+            assert!(picker(&app).selected.is_empty());
+            let _ = app.update(Message::TagCheck(tag, true));
+            let _ = app.update(Message::SaveTagSelection);
+            assert!(app.dialog.is_none());
+            assert_eq!(app.main_pane.selected, BTreeSet::from([1, 65]));
+            assert_eq!(app.main_pane.focus, Some(1));
+            assert_eq!(app.main_pane.page, 3);
+        }
         app.main_pane.tag_draft.insert(1);
         let _ = app.update(Message::TagFilterCheck(1, true));
         assert!(app.main_pane.selected.is_empty());
