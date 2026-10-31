@@ -839,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn recycling_waits_for_release_and_times_out_without_dispatching() {
+    fn deletion_waits_for_release_and_times_out_without_dispatching() {
         let dir = tempfile::tempdir().unwrap();
         let (mut app, _) = crate::ui::App::boot(dir.path().into(), None, None);
         if let Some(mut service) = app.service.take() {
@@ -857,13 +857,17 @@ mod tests {
             path: dir.path().join("never-created.mp4"),
             hash: "test".into(),
         }];
-        app.pending_trash = Some((targets.clone(), Instant::now()));
+        app.deletion.start(targets.clone());
+        app.pending_delete = Some((1, targets.clone(), Instant::now()));
         let _ = app.update(crate::ui::Message::Tick);
-        assert!(app.pending_trash.is_some());
-        app.pending_trash = Some((targets, Instant::now() - Duration::from_secs(11)));
+        assert!(app.pending_delete.is_some());
+        app.pending_delete = Some((1, targets, Instant::now() - Duration::from_secs(11)));
         let _ = app.update(crate::ui::Message::Tick);
-        assert!(app.pending_trash.is_none());
-        assert!(app.error.as_deref().unwrap().contains("未移入回收站"));
+        assert!(app.pending_delete.is_none());
+        let outcome = app.deletion.outcome.as_ref().unwrap();
+        assert!(!app.deletion.busy());
+        assert_eq!(outcome.deleted, 0);
+        assert!(outcome.failures[0].reason.contains("尚未释放"));
         drop(release);
         let deadline = Instant::now() + Duration::from_secs(2);
         while !app.playback_jobs.is_idle() {

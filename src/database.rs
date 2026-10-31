@@ -364,8 +364,8 @@ impl Database {
         Ok(())
     }
 
-    pub fn matches_delete_target(&self, target: &DeleteTarget) -> Result<bool> {
-        Ok(self.conn.query_row("SELECT EXISTS(SELECT 1 FROM files JOIN videos ON videos.id=files.video_id WHERE files.id=? AND files.path_key=? AND videos.hash=?)",params![target.file_id,path_key(&target.path),target.hash],|r|r.get(0))?)
+    pub fn matches_delete_target(&self, video_id: i64, target: &DeleteTarget) -> Result<bool> {
+        Ok(self.conn.query_row("SELECT EXISTS(SELECT 1 FROM files JOIN videos ON videos.id=files.video_id WHERE videos.id=? AND files.id=? AND files.path_key=? AND videos.hash=?)",params![video_id,target.file_id,path_key(&target.path),target.hash],|r|r.get(0))?)
     }
 
     pub fn add_root(&self, path: &Path) -> Result<()> {

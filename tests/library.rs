@@ -302,6 +302,28 @@ fn wait_snapshot(service: &Service, predicate: impl Fn(&Snapshot) -> bool) -> Sn
     panic!("Timed out waiting for snapshot")
 }
 
+fn wait_deletion(service: &Service) -> (Vec<DeleteProgress>, DeleteOutcome, Snapshot) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut progress = Vec::new();
+    let mut snapshot = None;
+    while Instant::now() < deadline {
+        match service.events.recv_timeout(Duration::from_millis(200)) {
+            Ok(Event::DeleteProgress(value)) => progress.push(value),
+            Ok(Event::Snapshot(value)) => snapshot = Some(value),
+            Ok(Event::DeleteFinished(outcome)) => {
+                return (
+                    progress,
+                    outcome,
+                    snapshot.expect("records published before completion"),
+                );
+            }
+            Ok(Event::Error(error)) => panic!("deletion must report its own outcome: {error}"),
+            _ => {}
+        }
+    }
+    panic!("Timed out waiting for deletion outcome")
+}
+
 #[test]
 fn watcher_detects_new_file_and_shutdown_joins_workers() {
     let tmp = tempfile::tempdir().unwrap();
@@ -341,10 +363,9 @@ fn restart_finds_files_added_while_closed() {
 }
 
 #[test]
-#[ignore = "Moves only a generated temporary fixture to the Windows Recycle Bin"]
-fn actual_recycle_bin_preserves_unselected_copy() {
+fn permanent_deletion_preserves_unselected_copy_and_removes_last_record() {
     let tmp = tempfile::tempdir().unwrap();
-    let a = file(tmp.path(), "recycle-test-only.mp4", b"test fixture");
+    let a = file(tmp.path(), "delete-test-only.mp4", b"test fixture");
     let b = file(tmp.path(), "keep-test-only.mp4", b"test fixture");
     let mut service = Service::start(tmp.path().join("data")).unwrap();
     service.send(Command::Import(vec![a.clone(), b.clone()]));
@@ -355,17 +376,116 @@ fn actual_recycle_bin_preserves_unselected_copy() {
     let target = v.files.iter().find(|f| f.path == a).unwrap();
     service.send(Command::Assign(vec![v.id], TagAssignment::Keep, true));
     wait_snapshot(&service, |s| s.videos[0].library);
-    service.send(Command::Trash(vec![DeleteTarget {
-        file_id: target.id,
-        path: a.clone(),
-        hash: v.hash.clone(),
-    }]));
-    wait_snapshot(&service, |s| {
-        s.videos.first().is_some_and(|v| v.files.len() == 1)
-    });
-    service.shutdown();
+    service.send(Command::Delete(
+        v.id,
+        vec![DeleteTarget {
+            file_id: target.id,
+            path: a.clone(),
+            hash: v.hash.clone(),
+        }],
+    ));
+    let (progress, outcome, snapshot) = wait_deletion(&service);
+    assert_eq!(outcome.total, 1);
+    assert_eq!(outcome.deleted, 1);
+    assert!(outcome.failures.is_empty());
+    assert_eq!(snapshot.videos[0].files.len(), 1);
+    assert_eq!(progress.first().unwrap().stage, DeleteStage::Preparing);
+    assert!(
+        progress
+            .iter()
+            .any(|p| p.stage == DeleteStage::WaitingForScan)
+    );
+    for stage in [DeleteStage::Verifying, DeleteStage::Removing] {
+        let step = progress.iter().find(|p| p.stage == stage).unwrap();
+        assert_eq!(step.path.as_ref(), Some(&a));
+        assert_eq!((step.completed, step.total), (0, 1));
+    }
     assert!(!a.exists());
     assert!(b.exists());
+    let kept = v.files.iter().find(|f| f.path == b).unwrap();
+    service.send(Command::Delete(
+        v.id,
+        vec![DeleteTarget {
+            file_id: kept.id,
+            path: b.clone(),
+            hash: v.hash.clone(),
+        }],
+    ));
+    let (_, outcome, snapshot) = wait_deletion(&service);
+    assert_eq!(outcome.deleted, 1);
+    assert!(outcome.failures.is_empty());
+    assert!(snapshot.videos.is_empty());
+    service.shutdown();
+    assert!(!b.exists());
+}
+
+#[test]
+fn deletion_rejects_a_request_containing_multiple_videos_before_deleting_any_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = file(tmp.path(), "first.mp4", b"first video");
+    let b = file(tmp.path(), "second.mp4", b"second video");
+    let data = tmp.path().join("data");
+    let mut service = Service::start(data.clone()).unwrap();
+    service.send(Command::Import(vec![a.clone(), b.clone()]));
+    let snapshot = wait_snapshot(&service, |s| s.videos.len() == 2);
+    let targets = snapshot
+        .videos
+        .iter()
+        .map(|v| DeleteTarget {
+            file_id: v.files[0].id,
+            path: v.files[0].path.clone(),
+            hash: v.hash.clone(),
+        })
+        .collect();
+    service.send(Command::Delete(snapshot.videos[0].id, targets));
+    let (progress, outcome, _) = wait_deletion(&service);
+    service.shutdown();
+    assert_eq!(
+        (outcome.total, outcome.deleted, outcome.failures.len()),
+        (2, 0, 2)
+    );
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .all(|failure| failure.reason.contains("其他视频"))
+    );
+    assert!(progress.iter().all(|p| p.stage == DeleteStage::Preparing));
+    assert!(a.exists());
+    assert!(b.exists());
+    let db = Database::open(&data.join("library.sqlite3")).unwrap();
+    assert_eq!(db.files().unwrap().len(), 2);
+}
+
+#[test]
+fn forget_command_changes_only_one_video_and_preserves_original_files() {
+    for pending in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = file(tmp.path(), "first.mp4", b"first video");
+        let b = file(tmp.path(), "second.mp4", b"second video");
+        let mut service = Service::start(tmp.path().join("data")).unwrap();
+        service.send(Command::Import(vec![a.clone(), b.clone()]));
+        let snapshot = wait_snapshot(&service, |s| s.videos.len() == 2);
+        let target = snapshot.videos[0].id;
+        if !pending {
+            service.send(Command::Assign(
+                snapshot.videos.iter().map(|v| v.id).collect(),
+                TagAssignment::Keep,
+                true,
+            ));
+            wait_snapshot(&service, |s| s.videos.iter().all(|v| v.library));
+        }
+        service.send(Command::Forget(target, pending));
+        let result = wait_snapshot(&service, |s| {
+            s.videos.len() == 1 && s.videos[0].id != target
+        });
+        service.shutdown();
+        let other = result.videos.iter().find(|v| v.id != target).unwrap();
+        assert_eq!(other.pending(), pending);
+        assert_eq!(other.library, !pending);
+        assert!(a.exists());
+        assert!(b.exists());
+    }
 }
 
 #[test]
@@ -378,21 +498,20 @@ fn changed_file_is_not_deleted_using_stale_confirmation() {
     let v = &s.videos[0];
     let f = &v.files[0];
     fs::write(&path, b"replacement").unwrap();
-    service.send(Command::Trash(vec![DeleteTarget {
-        file_id: f.id,
-        path: path.clone(),
-        hash: v.hash.clone(),
-    }]));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut failed = false;
-    while Instant::now() < deadline {
-        if let Ok(Event::Error(e)) = service.events.recv_timeout(Duration::from_millis(200)) {
-            failed = e.contains("未删除");
-            break;
-        }
-    }
+    service.send(Command::Delete(
+        v.id,
+        vec![DeleteTarget {
+            file_id: f.id,
+            path: path.clone(),
+            hash: v.hash.clone(),
+        }],
+    ));
+    let (_, outcome, _) = wait_deletion(&service);
     service.shutdown();
-    assert!(failed);
+    assert_eq!((outcome.deleted, outcome.failures.len()), (0, 1));
+    assert_eq!(outcome.failures[0].path, path);
+    assert!(outcome.failures[0].reason.contains("未删除"));
+    assert!(outcome.failures[0].reason.contains("变化"));
     assert_eq!(fs::read(&path).unwrap(), b"replacement");
 }
 
@@ -411,25 +530,149 @@ fn locked_file_deletion_keeps_database_record() {
         .share_mode(3)
         .open(&path)
         .unwrap();
-    service.send(Command::Trash(vec![DeleteTarget {
-        file_id: f.id,
-        path: path.clone(),
-        hash: v.hash.clone(),
-    }]));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut failed = false;
-    while Instant::now() < deadline {
-        if let Ok(Event::Error(_)) = service.events.recv_timeout(Duration::from_millis(200)) {
-            failed = true;
-            break;
-        }
-    }
+    service.send(Command::Delete(
+        v.id,
+        vec![DeleteTarget {
+            file_id: f.id,
+            path: path.clone(),
+            hash: v.hash.clone(),
+        }],
+    ));
+    let (_, outcome, _) = wait_deletion(&service);
     service.shutdown();
     drop(writer);
-    assert!(failed);
+    assert_eq!((outcome.deleted, outcome.failures.len()), (0, 1));
+    assert_eq!(outcome.failures[0].path, path);
+    assert!(outcome.failures[0].reason.contains("占用"));
     assert!(path.exists());
     let db = Database::open(&tmp.path().join("data/library.sqlite3")).unwrap();
     assert_eq!(db.files().unwrap().len(), 1);
+}
+
+#[test]
+fn deletion_reports_each_failure_and_continues_with_other_confirmed_copies() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let paths: Vec<_> = ["locked.mp4", "changed.mp4", "delete.mp4", "keep.mp4"]
+        .iter()
+        .map(|name| file(tmp.path(), name, b"same video"))
+        .collect();
+    let mut service = Service::start(tmp.path().join("data")).unwrap();
+    service.send(Command::Import(paths.clone()));
+    let snapshot = wait_snapshot(&service, |s| {
+        s.videos.first().is_some_and(|v| v.files.len() == 4)
+    });
+    let video = &snapshot.videos[0];
+    // Allow verification reads but deny deletion, covering failure after hashing.
+    let reader = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(&paths[0])
+        .unwrap();
+    fs::write(&paths[1], b"changed content").unwrap();
+    let targets = paths[..3]
+        .iter()
+        .map(|path| DeleteTarget {
+            file_id: video
+                .files
+                .iter()
+                .find(|file| &file.path == path)
+                .unwrap()
+                .id,
+            path: path.clone(),
+            hash: video.hash.clone(),
+        })
+        .collect();
+    service.send(Command::Delete(video.id, targets));
+    let (progress, outcome, snapshot) = wait_deletion(&service);
+    service.shutdown();
+    drop(reader);
+    assert_eq!(
+        (outcome.total, outcome.deleted, outcome.failures.len()),
+        (3, 1, 2)
+    );
+    assert_eq!(outcome.failures[0].path, paths[0]);
+    assert!(outcome.failures[0].reason.contains("无法删除文件"));
+    assert!(outcome.failures[0].reason.contains("占用"));
+    assert_eq!(outcome.failures[1].path, paths[1]);
+    assert!(outcome.failures[1].reason.contains("内容已变化"));
+    let verified: Vec<_> = progress
+        .iter()
+        .filter(|p| p.stage == DeleteStage::Verifying)
+        .map(|p| p.completed)
+        .collect();
+    assert_eq!(verified, vec![0, 1, 2]);
+    assert_eq!(snapshot.videos[0].files.len(), 3);
+    assert!(paths[0].exists());
+    assert_eq!(fs::read(&paths[1]).unwrap(), b"changed content");
+    assert!(!paths[2].exists());
+    assert!(paths[3].exists());
+}
+
+#[test]
+fn deletion_reports_the_actual_result_for_missing_and_readonly_files() {
+    for readonly in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = file(tmp.path(), "fixture.mp4", b"test fixture");
+        let mut service = Service::start(tmp.path().join("data")).unwrap();
+        service.send(Command::Import(vec![path.clone()]));
+        let snapshot = wait_snapshot(&service, |s| !s.videos.is_empty());
+        let video = &snapshot.videos[0];
+        let permissions = fs::metadata(&path).unwrap().permissions();
+        if readonly {
+            let mut locked = permissions.clone();
+            locked.set_readonly(true);
+            fs::set_permissions(&path, locked).unwrap();
+        } else {
+            fs::remove_file(&path).unwrap();
+        }
+        service.send(Command::Delete(
+            video.id,
+            vec![DeleteTarget {
+                file_id: video.files[0].id,
+                path: path.clone(),
+                hash: video.hash.clone(),
+            }],
+        ));
+        let (_, outcome, _) = wait_deletion(&service);
+        service.shutdown();
+        let still_exists = path.exists();
+        if readonly && still_exists {
+            fs::set_permissions(&path, permissions).unwrap();
+        }
+        // Windows can permit deleting a read-only file. Its attribute alone
+        // must not be reported as a permission failure after a successful delete.
+        if readonly && !still_exists {
+            assert_eq!((outcome.total, outcome.deleted), (1, 1));
+            assert!(outcome.failures.is_empty());
+            continue;
+        }
+        assert_eq!(
+            (outcome.total, outcome.deleted, outcome.failures.len()),
+            (1, 0, 1)
+        );
+        assert_eq!(outcome.failures[0].path, path);
+        assert!(outcome.failures[0].reason.contains(if readonly {
+            "访问被拒绝"
+        } else {
+            "检查路径"
+        }));
+    }
+}
+
+#[test]
+fn empty_deletion_request_reports_failure_and_service_remains_available() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut service = Service::start(tmp.path().join("data")).unwrap();
+    wait_snapshot(&service, |_| true);
+    service.send(Command::Delete(1, vec![]));
+    let (_, outcome, _) = wait_deletion(&service);
+    assert_eq!(outcome.deleted, 0);
+    assert_eq!(outcome.failures.len(), 1);
+    assert!(outcome.failures[0].reason.contains("未选择文件"));
+    service.send(Command::CreateTag("仍可使用".into()));
+    wait_snapshot(&service, |s| s.tags.len() == 1);
+    service.shutdown();
 }
 
 #[test]

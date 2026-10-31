@@ -16,6 +16,7 @@ use video_management::{
 mod backdrop;
 mod branding;
 mod covers;
+mod deletion;
 mod dropdown;
 pub(crate) mod fluent;
 mod listing;
@@ -59,15 +60,16 @@ struct Pane {
     page_size: PageSize,
     page_input: Option<String>,
     tag_draft: BTreeSet<i64>,
-    command_menu_open: bool,
-    command_menu_focus: Option<selection::Action>,
+    context_menu: Option<i64>,
+    context_menu_focus: Option<selection::Action>,
 }
 #[derive(Debug, Clone)]
 enum Dialog {
     Tag(Option<i64>),
     DeleteTag(i64),
     Tags(TagPicker),
-    Trash {
+    Delete {
+        video_id: i64,
         files: Vec<VideoFile>,
         selected: BTreeSet<i64>,
         targets: Vec<DeleteTarget>,
@@ -122,16 +124,15 @@ pub enum Message {
     SaveTagSelection,
     Assign(bool),
     ConfirmAssign,
-    Forget(bool),
     NewTag(window::Id),
     EditTag(i64),
     DeleteTag(i64),
     TagName(String),
     SaveTag,
     ConfirmDeleteTag,
-    Trash(bool, window::Id),
-    TrashCheck(i64, bool),
-    ConfirmTrash,
+    Delete(bool, i64),
+    DeleteCheck(i64, bool),
+    ConfirmDelete,
     Dismiss,
     ShowRoots,
     ShowUpdates,
@@ -162,12 +163,14 @@ pub enum Message {
     OpenInExplorer(PathBuf),
     ClearError,
     ClearUpdateNotice,
+    ToggleDeleteDetails,
+    ClearDeleteNotice,
     ToggleDetails(bool),
     ResizeDetails(bool, f32),
     ClearSelection(bool),
-    CommandMenu(bool, bool),
-    CommandMenuKey(bool, bool, iced::keyboard::key::Named, bool),
-    SelectionCommand(bool, selection::Action),
+    ContextMenu(bool, Option<i64>),
+    ContextMenuKey(bool, iced::keyboard::key::Named, bool),
+    VideoCommand(bool, i64, selection::Action),
     FocusSearch(window::Id),
 }
 pub struct App {
@@ -194,7 +197,8 @@ pub struct App {
     player: Option<Video>,
     loader: Option<playback::Load>,
     playback_jobs: playback::Jobs,
-    pending_trash: Option<(Vec<DeleteTarget>, std::time::Instant)>,
+    pending_delete: Option<(i64, Vec<DeleteTarget>, std::time::Instant)>,
+    deletion: deletion::DeletionUi,
     playing_file: Option<i64>,
     player_window: window::Id,
     player_title: String,
@@ -264,7 +268,8 @@ impl App {
                 player: None,
                 loader: None,
                 playback_jobs: playback::Jobs::default(),
-                pending_trash: None,
+                pending_delete: None,
+                deletion: deletion::DeletionUi::default(),
                 playing_file: None,
                 player_window: main,
                 player_title: String::new(),
@@ -540,6 +545,8 @@ impl App {
                             self.error = Some(e);
                             self.progress = None;
                         }
+                        Event::DeleteProgress(progress) => self.deletion.progress = Some(progress),
+                        Event::DeleteFinished(outcome) => self.deletion.finish(outcome),
                         Event::Settings(s) => self.settings = s,
                         Event::AppSettings(s) => {
                             self.app_settings = s;
@@ -566,6 +573,10 @@ impl App {
                             self.updates.settings_received(result, true)
                         }
                         Event::Stopped => {
+                            self.fail_delete(
+                                "后台服务已停止，无法确认删除结果。请重新打开软件核对文件。",
+                            );
+                            self.pending_delete = None;
                             self.migration.service_stopped();
                             self.service.take();
                             self.app_settings_loaded = false;
@@ -590,14 +601,13 @@ impl App {
                 if let Some(task) = self.tick_migration() {
                     return task;
                 }
-                if let Some((targets, started)) = self.pending_trash.take() {
+                if let Some((video_id, targets, started)) = self.pending_delete.take() {
                     if self.playback_jobs.is_idle() {
-                        self.send(Command::Trash(targets));
+                        self.dispatch_delete(video_id, targets);
                     } else if started.elapsed() >= Duration::from_secs(10) {
-                        self.error =
-                            Some("播放组件尚未释放文件，未移入回收站，请稍后重试。".into());
+                        self.fail_delete("播放组件尚未释放文件，未删除。请稍后重试。");
                     } else {
-                        self.pending_trash = Some((targets, started));
+                        self.pending_delete = Some((video_id, targets, started));
                     }
                 }
                 if self.loader.as_ref().is_some_and(|l| l.expired()) {
@@ -664,7 +674,7 @@ impl App {
                 }
                 if Some(id) == self.pending {
                     self.pending = None;
-                    self.pending_pane.command_menu_open = false;
+                    self.pending_pane.context_menu = None;
                     self.pending_pane.tag_draft.clear();
                     if self.player_window == id {
                         self.stop_player();
@@ -679,7 +689,7 @@ impl App {
             Message::OpenPending => return self.open_pending(true),
             Message::Filter(f) => {
                 self.tag_filter_open = false;
-                self.main_pane.command_menu_open = false;
+                self.main_pane.context_menu = None;
                 self.page = MainPage::Library;
                 self.filter = f;
                 self.main_pane.selected.clear();
@@ -749,7 +759,7 @@ impl App {
             Message::CancelScan => self.send(Command::Cancel),
             Message::Search(p, s) => {
                 let pane = self.pane_mut(p);
-                pane.command_menu_open = false;
+                pane.context_menu = None;
                 pane.search = s;
                 pane.page = 0;
                 pane.page_input = None;
@@ -764,7 +774,7 @@ impl App {
                 return listing::scroll_to_top(p);
             }
             Message::TagFilterOpen(open) => {
-                self.main_pane.command_menu_open = false;
+                self.main_pane.context_menu = None;
                 self.tag_filter_open = open;
                 if open {
                     self.tag_filter_focus = 0;
@@ -789,6 +799,7 @@ impl App {
             }
             Message::TagFilterKey(key, reverse) => return self.tag_filter_key(key, reverse),
             Message::Select(p, id) => {
+                self.pane_mut(p).context_menu = None;
                 let owner = if p {
                     self.pending.unwrap_or(self.main)
                 } else {
@@ -915,10 +926,6 @@ impl App {
                     self.clear_tag_selection(accept);
                 }
             }
-            Message::Forget(p) => {
-                self.send(Command::Forget(self.ids(p), p));
-                self.clear_tag_selection(p);
-            }
             Message::NewTag(id) => {
                 self.tag_filter_open = false;
                 if id == self.main && self.page == MainPage::Tags {
@@ -968,13 +975,15 @@ impl App {
                     self.send(Command::DeleteTag(id));
                 }
             }
-            Message::Trash(p, id) => {
-                let ids = self.ids(p);
+            Message::Delete(p, video_id) => {
+                if self.deletion.busy() || !self.video_command_enabled(p, video_id) {
+                    return Task::none();
+                }
                 let files: Vec<_> = self
                     .snapshot
                     .videos
                     .iter()
-                    .filter(|v| ids.contains(&v.id))
+                    .filter(|v| v.id == video_id)
                     .flat_map(|v| {
                         v.files
                             .iter()
@@ -1010,48 +1019,70 @@ impl App {
                     })
                     .collect();
                 self.dialog = Some((
-                    id,
-                    Dialog::Trash {
+                    if p { self.pending.unwrap() } else { self.main },
+                    Dialog::Delete {
+                        video_id,
                         files,
                         selected,
                         targets,
                     },
                 ));
             }
-            Message::TrashCheck(id, on) => {
-                if let Some((_, Dialog::Trash { selected, .. })) = &mut self.dialog {
+            Message::DeleteCheck(id, on) => {
+                if let Some((
+                    _,
+                    Dialog::Delete {
+                        files, selected, ..
+                    },
+                )) = &mut self.dialog
+                {
                     if on {
-                        selected.insert(id);
+                        if files
+                            .iter()
+                            .any(|file| file.id == id && file.availability == Availability::Present)
+                        {
+                            selected.insert(id);
+                        }
                     } else {
                         selected.remove(&id);
                     }
                 }
             }
-            Message::ConfirmTrash => {
-                if self.pending_trash.is_some() {
-                    self.error = Some("正在等待播放器释放文件，请稍后重试。".into());
+            Message::ConfirmDelete => {
+                if self.deletion.busy() || self.pending_delete.is_some() {
                     return Task::none();
                 }
                 if let Some((
                     _,
-                    Dialog::Trash {
-                        selected, targets, ..
+                    Dialog::Delete {
+                        video_id,
+                        selected,
+                        targets,
+                        ..
                     },
                 )) = self.dialog.take()
                 {
-                    if self.playing_file.is_some_and(|id| selected.contains(&id)) {
-                        self.stop_player();
-                    }
                     let targets: Vec<_> = targets
                         .into_iter()
                         .filter(|t| selected.contains(&t.file_id))
                         .collect();
+                    if targets.is_empty() {
+                        return Task::none();
+                    }
+                    self.deletion.start(targets.clone());
+                    self.main_pane.context_menu = None;
+                    self.pending_pane.context_menu = None;
+                    if self.playing_file.is_some_and(|id| selected.contains(&id)) {
+                        self.stop_player();
+                    }
                     // Asynchronous stop may still own file handles. Preserve
                     // the confirmed targets, but never wait in the event loop.
                     if self.playback_jobs.is_idle() {
-                        self.send(Command::Trash(targets));
+                        self.dispatch_delete(video_id, targets);
                     } else {
-                        self.pending_trash = Some((targets, std::time::Instant::now()));
+                        self.deletion.progress.as_mut().unwrap().stage =
+                            DeleteStage::WaitingForPlayer;
+                        self.pending_delete = Some((video_id, targets, std::time::Instant::now()));
                     }
                 }
             }
@@ -1162,12 +1193,13 @@ impl App {
             Message::ShowMigration => self.dialog = Some((self.main, Dialog::Migration)),
             Message::Preview(id, owner) | Message::Play(id, owner) => {
                 let autoplay = matches!(message, Message::Play(..));
-                if self
-                    .pending_trash
-                    .as_ref()
-                    .is_some_and(|(targets, _)| targets.iter().any(|t| t.file_id == id))
+                if self.deletion.contains(id)
+                    || self
+                        .pending_delete
+                        .as_ref()
+                        .is_some_and(|(_, targets, _)| targets.iter().any(|t| t.file_id == id))
                 {
-                    self.error = Some("此文件正在移入回收站，请稍候。".into());
+                    self.error = Some("此文件正在删除，请稍候。".into());
                     return Task::none();
                 }
                 let info = self.snapshot.videos.iter().find_map(|v| {
@@ -1291,6 +1323,12 @@ impl App {
             Message::OpenInExplorer(path) => self.send(Command::OpenInExplorer(path)),
             Message::ClearError => self.error = None,
             Message::ClearUpdateNotice => self.update_notice = None,
+            Message::ToggleDeleteDetails => self.deletion.expanded = !self.deletion.expanded,
+            Message::ClearDeleteNotice => {
+                if !self.deletion.busy() {
+                    self.deletion = deletion::DeletionUi::default();
+                }
+            }
             Message::ToggleDetails(p) => {
                 self.details_visible[usize::from(p)] = !self.details_visible[usize::from(p)];
                 let owner = if p { self.pending } else { Some(self.main) };
@@ -1311,14 +1349,14 @@ impl App {
             Message::ClearSelection(p) => {
                 self.clear_tag_selection(p);
             }
-            Message::CommandMenu(p, open) => return self.open_command_menu(p, open),
-            Message::CommandMenuKey(p, compact, key, reverse) => {
-                return self.command_menu_key(p, compact, key, reverse);
+            Message::ContextMenu(p, id) => return self.open_context_menu(p, id),
+            Message::ContextMenuKey(p, key, reverse) => {
+                return self.context_menu_key(p, key, reverse);
             }
-            Message::SelectionCommand(p, action) => return self.selection_command(p, action),
+            Message::VideoCommand(p, id, action) => return self.video_command(p, id, action),
             Message::FocusSearch(id) => {
                 if self.dialog.is_none() {
-                    self.pane_mut(Some(id) == self.pending).command_menu_open = false;
+                    self.pane_mut(Some(id) == self.pending).context_menu = None;
                     if id == self.main {
                         self.tag_filter_open = false;
                         self.page = MainPage::Library;

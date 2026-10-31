@@ -64,7 +64,7 @@ impl App {
         pane.selected.clear();
         pane.focus = None;
         pane.tag_draft.clear();
-        pane.command_menu_open = false;
+        pane.context_menu = None;
     }
 
     pub(super) fn reconcile_tags(&mut self) -> bool {

@@ -43,6 +43,8 @@ pub struct Palette {
     pub disabled: Color,
     pub panel_edge: Color,
     pub error_surface: Color,
+    pub success_surface: Color,
+    pub warning_surface: Color,
     pub shell: Color,
     pub modal: Color,
     pub scrim: Color,
@@ -71,6 +73,8 @@ impl Palette {
                 disabled: Color::from_rgb8(56, 60, 67),
                 panel_edge: Color::from_rgba(1.0, 1.0, 1.0, 0.10),
                 error_surface: Color::from_rgb8(66, 37, 44),
+                success_surface: Color::from_rgb8(31, 53, 40),
+                warning_surface: Color::from_rgb8(67, 53, 25),
                 shell: Color::from_rgba(0.10, 0.12, 0.15, 0.65),
                 modal: Color::from_rgba(0.16, 0.18, 0.21, 0.98),
                 scrim: Color::from_rgba(0.0, 0.0, 0.0, 0.40),
@@ -97,6 +101,8 @@ impl Palette {
                 disabled: Color::from_rgb8(223, 227, 233),
                 panel_edge: Color::from_rgba(1.0, 1.0, 1.0, 0.72),
                 error_surface: Color::from_rgb8(253, 237, 237),
+                success_surface: Color::from_rgb8(223, 246, 221),
+                warning_surface: Color::from_rgb8(255, 244, 206),
                 shell: Color::from_rgba(0.95, 0.97, 1.0, 0.48),
                 modal: Color::from_rgba(0.98, 0.985, 1.0, 0.97),
                 scrim: Color::from_rgba(0.08, 0.12, 0.20, 0.22),
@@ -106,6 +112,36 @@ impl Palette {
 }
 pub fn palette(theme: &Theme) -> Palette {
     Palette::new(theme.extended_palette().is_dark)
+}
+
+#[derive(Clone, Copy)]
+pub enum FeedbackTone {
+    Information,
+    Success,
+    Warning,
+    Error,
+}
+
+pub fn feedback(theme: &Theme, tone: FeedbackTone) -> container::Style {
+    let colors = palette(theme);
+    container::Style {
+        background: Some(
+            match tone {
+                FeedbackTone::Information => colors.tint,
+                FeedbackTone::Success => colors.success_surface,
+                FeedbackTone::Warning => colors.warning_surface,
+                FeedbackTone::Error => colors.error_surface,
+            }
+            .into(),
+        ),
+        text_color: Some(colors.ink),
+        border: Border {
+            color: colors.line,
+            width: 1.0,
+            radius: 8.into(),
+        },
+        ..Default::default()
+    }
 }
 // Fluent motion: short, interruptible transitions, with no fading of content.
 pub const MOTION_HOVER: std::time::Duration = std::time::Duration::from_millis(120);

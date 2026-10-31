@@ -184,6 +184,7 @@ impl Pane {
     }
 
     pub fn set_page(&mut self, page: usize, total: usize) {
+        self.context_menu = None;
         self.page = Pagination::new(page, self.page_size, total).page;
         self.page_input = None;
     }
@@ -201,6 +202,7 @@ impl Pane {
     }
 
     pub fn toggle_sort(&mut self, sort: Sort) {
+        self.context_menu = None;
         self.sort_order = if self.sort == sort {
             self.sort_order.reverse()
         } else {

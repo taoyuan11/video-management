@@ -126,6 +126,9 @@ impl App {
                 .style(inset),
             );
         }
+        if let Some(notice) = self.delete_notice() {
+            workspace = workspace.push(notice);
+        }
         if let Some(error) = &self.error {
             workspace = workspace.push(
                 container(
@@ -618,7 +621,7 @@ impl App {
                 ]
                 .spacing(LIST_COLUMN_SPACING)
                 .align_y(Alignment::Center);
-                list = list.push(
+                list = list.push(dropdown::video_menu(
                     // Child controls consume their own clicks; all remaining
                     // row content and padding select the video.
                     container(
@@ -633,7 +636,11 @@ impl App {
                         border: iced::border::rounded(8),
                         ..Default::default()
                     }),
-                );
+                    self.video_menu(pending, video_id),
+                    pending,
+                    video_id,
+                    self.video_list_enabled(pending),
+                ));
             }
             content = content.push(motion::enter(
                 (
@@ -1435,7 +1442,8 @@ impl App {
                     .padding([10, 16])
                     .style(primary)
                     .on_press_maybe(
-                        (idle && self.service.is_some()).then_some(Message::InstallUpdate),
+                        (idle && self.service.is_some() && !self.deletion.busy())
+                            .then_some(Message::InstallUpdate),
                     ),
             );
         }
@@ -1548,7 +1556,7 @@ impl App {
             ]
             .spacing(24)
             .into(),
-            Dialog::Trash {
+            Dialog::Delete {
                 files, selected, ..
             } => {
                 let mut paths = column![].spacing(12);
@@ -1559,7 +1567,10 @@ impl App {
                             row![
                                 checkbox(selected.contains(&file.id))
                                     .size(18)
-                                    .on_toggle(move |on| Message::TrashCheck(file_id, on)),
+                                    .on_toggle_maybe(
+                                        (file.availability == Availability::Present)
+                                            .then_some(move |on| Message::DeleteCheck(file_id, on))
+                                    ),
                                 column![
                                     text(file.path.to_string_lossy().to_string())
                                         .size(12)
@@ -1583,11 +1594,14 @@ impl App {
                     );
                 }
                 column![
-                    heading("将文件移入回收站？", 22),
-                    text("请核对文件路径。默认每个视频仅选一个可访问副本，未选中的文件会保留。")
+                    heading("永久删除此视频的文件？", 22),
+                    text("文件将直接删除，不会移入回收站，删除后无法恢复。")
+                        .size(13)
+                        .color(colors.danger),
+                    text("请核对完整路径。默认仅选一个可访问副本，未选中的文件会保留。")
                         .size(13)
                         .color(colors.muted),
-                    scrollable(paths).height(260),
+                    scrollable(paths).height(220),
                     text(format!("已选择 {} 个文件", selected.len()))
                         .size(12)
                         .color(colors.muted),
@@ -1595,16 +1609,16 @@ impl App {
                     row![
                         space::horizontal(),
                         cancel(),
-                        button(button_text("移入回收站").size(13))
+                        button(button_text("永久删除").size(13))
                             .style(danger)
                             .padding([10, 16])
                             .on_press_maybe(
-                                (!selected.is_empty()).then_some(Message::ConfirmTrash)
+                                (!selected.is_empty()).then_some(Message::ConfirmDelete)
                             )
                     ]
                     .spacing(8)
                 ]
-                .spacing(20)
+                .spacing(16)
                 .into()
             }
             Dialog::Roots => {
@@ -1852,7 +1866,111 @@ fn title_char_width(character: char) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{title_without_extension, truncate_title};
+    use super::*;
+    use iced::{
+        Event, Point, Rectangle, Renderer, Size,
+        advanced::{Layout, Shell, clipboard, layout, mouse, renderer::Headless, widget::Tree},
+        futures::FutureExt,
+    };
+
+    #[test]
+    fn pending_rows_receive_clicks_while_the_main_roots_dialog_is_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut app, _) = App::boot(temp.path().to_path_buf(), None, None);
+        if let Some(mut service) = app.service.take() {
+            service.shutdown();
+        }
+        app.library_loading = false;
+        let _ = app.update(Message::ShowRoots);
+        let _ = app.update(Message::Roots(vec![temp.path().to_path_buf()]));
+        // Match the automatic-open path without executing a native window task.
+        let _ = app.open_pending(false);
+        app.snapshot.videos = vec![VideoItem {
+            id: 1,
+            hash: format!("{:064x}", 1),
+            title: "新增监控视频.mp4".into(),
+            tag_ids: vec![],
+            library: false,
+            created_at: 1,
+            duration_ms: None,
+            files: vec![VideoFile {
+                id: 1,
+                video_id: 1,
+                path: temp.path().join("新增监控视频.mp4"),
+                size: 10,
+                modified: 100,
+                state: FileState::Pending,
+                availability: Availability::Present,
+            }],
+        }];
+        let renderer = Renderer::new(iced::Font::DEFAULT, iced::Pixels(14.0), Some("tiny-skia"))
+            .now_or_never()
+            .flatten()
+            .expect("headless software renderer");
+
+        // 480 px is the list width at the pending window's supported minimum.
+        for width in [480.0, 700.0] {
+            let mut list = app.library(true, width < LIST_COMPACT_WIDTH);
+            let mut tree = Tree::new(&list);
+            let node = list.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(width, 500.0)),
+            );
+            let layout = Layout::new(&node);
+            struct FindRow(Option<Rectangle>);
+            impl iced::advanced::widget::Operation for FindRow {
+                fn traverse(
+                    &mut self,
+                    operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation),
+                ) {
+                    operate(self);
+                }
+                fn focusable(
+                    &mut self,
+                    id: Option<&widget::Id>,
+                    bounds: Rectangle,
+                    _: &mut dyn iced::advanced::widget::operation::Focusable,
+                ) {
+                    if id == Some(&selection::menu_id(true, 1).into()) {
+                        self.0 = Some(bounds);
+                    }
+                }
+            }
+            let mut row = FindRow(None);
+            list.as_widget_mut()
+                .operate(&mut tree, layout, &renderer, &mut row);
+            let bounds = row.0.expect("pending row must remain interactive");
+            for (x, check) in [(bounds.x + 60.0, false), (bounds.x + 21.0, true)] {
+                let cursor = mouse::Cursor::Available(Point::new(x, bounds.center_y()));
+                let mut messages = Vec::new();
+                for event in [
+                    mouse::Event::ButtonPressed(mouse::Button::Left),
+                    mouse::Event::ButtonReleased(mouse::Button::Left),
+                ] {
+                    list.as_widget_mut().update(
+                        &mut tree,
+                        &Event::Mouse(event),
+                        layout,
+                        cursor,
+                        &renderer,
+                        &mut clipboard::Null,
+                        &mut Shell::new(&mut messages),
+                        &Rectangle::with_size(Size::new(width, 500.0)),
+                    );
+                }
+                assert!(
+                    if check {
+                        matches!(messages.as_slice(), [Message::Check(true, 1, true)])
+                    } else {
+                        matches!(messages.as_slice(), [Message::Select(true, 1)])
+                    },
+                    "unexpected click messages at width {width}: {messages:?}",
+                );
+            }
+        }
+        assert!(matches!(app.dialog, Some((owner, Dialog::Roots)) if owner == app.main));
+    }
 
     #[test]
     fn list_title_removes_only_the_final_extension() {

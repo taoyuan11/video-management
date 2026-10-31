@@ -155,7 +155,7 @@ impl App {
             return actions;
         }
         let mut actions = vec![("取消", Message::Dismiss, false)];
-        if state.destination.is_some() && self.pending_trash.is_none() {
+        if state.destination.is_some() && self.pending_delete.is_none() && !self.deletion.busy() {
             actions.push(("开始迁移", Message::ConfirmMigration, true));
         }
         actions
@@ -269,7 +269,8 @@ impl App {
     pub(super) fn start_migration(&mut self, retry: bool) {
         if self.migration.busy()
             || self.updates.installing()
-            || self.pending_trash.is_some()
+            || self.pending_delete.is_some()
+            || self.deletion.busy()
             || self.service.is_none()
         {
             return;

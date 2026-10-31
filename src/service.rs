@@ -34,8 +34,8 @@ pub enum Command {
     RenameTag(i64, String),
     DeleteTag(i64),
     Assign(Vec<i64>, TagAssignment, bool),
-    Forget(Vec<i64>, bool),
-    Trash(Vec<DeleteTarget>),
+    Forget(i64, bool),
+    Delete(i64, Vec<DeleteTarget>),
     OpenInExplorer(PathBuf),
     Settings(Settings),
     AppSettings(AppSettings),
@@ -59,6 +59,8 @@ pub enum Event {
     },
     Status(String),
     Error(String),
+    DeleteProgress(DeleteProgress),
+    DeleteFinished(DeleteOutcome),
     Stopped,
     MigrationProgress(migration::Progress),
     MigrationFinished(migration::Outcome),
@@ -275,8 +277,22 @@ fn run(
                             | Command::OpenInExplorer(_)
                     )
                 {
-                    let _ =
-                        events.send(Event::Error("迁移尚未结束，请等待完成或重试清理。".into()));
+                    let reason = "迁移尚未结束，请等待完成或重试清理。";
+                    if let Command::Delete(_, targets) = command {
+                        let _ = events.send(Event::DeleteFinished(DeleteOutcome {
+                            total: targets.len(),
+                            deleted: 0,
+                            failures: targets
+                                .into_iter()
+                                .map(|target| DeleteFailure {
+                                    path: target.path,
+                                    reason: reason.into(),
+                                })
+                                .collect(),
+                        }));
+                    } else {
+                        let _ = events.send(Event::Error(reason.into()));
+                    }
                     continue;
                 }
                 let result = (|| -> Result<()> {
@@ -410,60 +426,139 @@ fn run(
                             db.assign(&ids, tag, accept)?;
                             dirty = true;
                         }
-                        Command::Forget(ids, pending_only) => {
-                            db.forget(&ids, pending_only)?;
+                        Command::Forget(id, pending_only) => {
+                            db.forget(&[id], pending_only)?;
                             dirty = true;
                         }
-                        Command::Trash(targets) => {
-                            // Destructive operations are serialized after cancelling the scanner,
-                            // so stale scan results cannot resurrect a just-deleted file.
-                            if let Some(a) = &active {
-                                a.cancel.store(true, Ordering::Relaxed);
-                            }
-                            if let Some(mut a) = active.take() {
-                                a.finish();
-                            }
-                            while let Ok(e) = scan_rx.try_recv() {
-                                apply_scan(e, &mut db, &mut dirty, &mut pending, &mut log)?;
-                            }
-                            for target in targets {
-                                if stop.load(Ordering::Relaxed) {
-                                    break;
-                                }
-                                if !db.matches_delete_target(&target)? {
-                                    let _ = events.send(Event::Error(format!(
-                                        "记录已变化，未删除：{}。请重新选择文件。",
-                                        target.path.display()
-                                    )));
-                                    continue;
-                                }
-                                let found = scanner::fingerprint(
-                                    &target.path,
-                                    false,
-                                    stop,
-                                    &ScanStats::default(),
+                        Command::Delete(video_id, targets) => {
+                            let mut outcome = DeleteOutcome {
+                                total: targets.len(),
+                                ..Default::default()
+                            };
+                            let progress = |stage, completed, path| {
+                                let _ = events.send(Event::DeleteProgress(DeleteProgress {
+                                    stage,
+                                    completed,
+                                    total: targets.len(),
+                                    path,
+                                }));
+                            };
+                            progress(DeleteStage::Preparing, 0, None);
+                            let preparation = (|| -> Result<()> {
+                                anyhow::ensure!(
+                                    !targets.is_empty(),
+                                    "未选择文件，请重新确认删除路径。"
                                 );
-                                if !found.as_ref().is_ok_and(|f| f.hash == target.hash) {
-                                    let _ = events.send(Event::Error(format!(
-                                        "文件已变化或正被占用，未删除：{}。请重新扫描后确认。",
-                                        target.path.display()
-                                    )));
-                                    continue;
+                                // Reject the entire request if it contains another video's copies.
+                                for target in &targets {
+                                    anyhow::ensure!(
+                                        db.matches_delete_target(video_id, target)?,
+                                        "记录已变化或包含其他视频，未删除。请重新选择文件。"
+                                    );
                                 }
-                                match trash::delete(&target.path) {
-                                    Ok(()) => {
-                                        db.remove_file(target.file_id)?;
+                                // Destructive operations are serialized after cancelling the scanner,
+                                // so stale scan results cannot resurrect a just-deleted file.
+                                progress(DeleteStage::WaitingForScan, 0, None);
+                                if let Some(a) = &active {
+                                    a.cancel.store(true, Ordering::Relaxed);
+                                }
+                                if let Some(mut a) = active.take() {
+                                    a.finish();
+                                }
+                                while let Ok(e) = scan_rx.try_recv() {
+                                    apply_scan(e, &mut db, &mut dirty, &mut pending, &mut log)?;
+                                }
+                                Ok(())
+                            })();
+                            if let Err(error) = preparation {
+                                let reason = format!("未删除：{error:#}");
+                                outcome.failures = targets
+                                    .iter()
+                                    .map(|target| DeleteFailure {
+                                        path: target.path.clone(),
+                                        reason: reason.clone(),
+                                    })
+                                    .collect();
+                                if outcome.failures.is_empty() {
+                                    outcome.failures.push(DeleteFailure {
+                                        path: PathBuf::new(),
+                                        reason,
+                                    });
+                                }
+                            } else {
+                                for (index, target) in targets.iter().enumerate() {
+                                    progress(
+                                        DeleteStage::Verifying,
+                                        index,
+                                        Some(target.path.clone()),
+                                    );
+                                    let result = (|| -> Result<()> {
+                                        anyhow::ensure!(
+                                            !stop.load(Ordering::Relaxed),
+                                            "程序正在退出，此文件未删除。"
+                                        );
+                                        anyhow::ensure!(
+                                            db.matches_delete_target(video_id, target)?,
+                                            "记录已变化，未删除。请重新选择文件。"
+                                        );
+                                        let found = scanner::fingerprint(
+                                            &target.path,
+                                            false,
+                                            stop,
+                                            &ScanStats::default(),
+                                        )
+                                        .map_err(|error| {
+                                            delete_io_error("无法校验文件，未删除", error)
+                                        })?;
+                                        anyhow::ensure!(
+                                            found.hash == target.hash,
+                                            "文件内容已变化，未删除。请重新扫描后核对文件。"
+                                        );
+                                        progress(
+                                            DeleteStage::Removing,
+                                            index,
+                                            Some(target.path.clone()),
+                                        );
+                                        fs::remove_file(&target.path).map_err(|error| {
+                                            delete_io_error(
+                                                "无法删除文件，记录已保留",
+                                                error.into(),
+                                            )
+                                        })?;
+                                        outcome.deleted += 1;
                                         dirty = true;
-                                    }
-                                    Err(e) => {
-                                        let _ = events.send(Event::Error(format!(
-                                            "未能移入回收站，记录已保留：{}\n{e}",
-                                            target.path.display()
-                                        )));
+                                        db.remove_file(target.file_id).context(
+                                    "文件已从磁盘删除，但资料库记录更新失败。请重新扫描修复记录"
+                                )?;
+                                        Ok(())
+                                    })();
+                                    if let Err(error) = result {
+                                        outcome.failures.push(DeleteFailure {
+                                            path: target.path.clone(),
+                                            reason: format!("{error:#}"),
+                                        });
                                     }
                                 }
                             }
-                            let _ = events.send(Event::Status("回收站操作完成".into()));
+                            for failure in &outcome.failures {
+                                let _ = writeln!(
+                                    log,
+                                    "删除：{}\n{}",
+                                    failure.path.display(),
+                                    failure.reason
+                                );
+                            }
+                            // Publish updated records before reporting completion so a new
+                            // confirmation cannot use a snapshot from before this operation.
+                            if let Err(error) = publish(&db, events) {
+                                outcome.failures.push(DeleteFailure {
+                                    path: data.join("library.sqlite3"),
+                                    reason: format!(
+                                        "删除后刷新资料库失败，请重新打开软件：{error:#}"
+                                    ),
+                                });
+                            }
+                            let _ = events.send(Event::DeleteFinished(outcome));
                         }
                         Command::OpenInExplorer(path) => crate::explorer::open(&path)?,
                         Command::Settings(settings) => {
@@ -671,6 +766,18 @@ fn run(
 fn publish(db: &Database, events: &Sender<Event>) -> Result<()> {
     let _ = events.send(Event::Snapshot(db.snapshot()?));
     Ok(())
+}
+fn delete_io_error(action: &str, error: anyhow::Error) -> anyhow::Error {
+    let hint = match error.downcast_ref::<std::io::Error>() {
+        Some(error) => match error.raw_os_error() {
+            Some(32 | 33) => "文件正被其他程序占用，请关闭占用程序后重试。",
+            Some(5) => "访问被拒绝，请检查文件权限和只读属性后重试。",
+            Some(2 | 3) => "文件或所在文件夹已移动、删除或离线，请检查路径后重新扫描。",
+            _ => "请检查文件、磁盘或网络连接后重试。",
+        },
+        None => "请重新扫描并核对文件后重试。",
+    };
+    anyhow::anyhow!("{action}。{hint}\n{error:#}")
 }
 fn apply_scan(
     event: ScanEvent,

@@ -136,6 +136,39 @@ pub struct DeleteTarget {
     pub hash: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteStage {
+    WaitingForPlayer,
+    Queued,
+    Preparing,
+    WaitingForScan,
+    Verifying,
+    Removing,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeleteProgress {
+    pub stage: DeleteStage,
+    /// Files processed, including failures; never an estimate of elapsed time.
+    pub completed: usize,
+    pub total: usize,
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeleteFailure {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DeleteOutcome {
+    pub total: usize,
+    /// Files actually removed from disk, even if updating their record failed.
+    pub deleted: usize,
+    pub failures: Vec<DeleteFailure>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub volume: f64,

@@ -182,7 +182,7 @@ impl App {
         self.send(Command::UpdateSettings(UpdateSettings { folder }));
     }
     pub(super) fn install_update(&mut self) {
-        if self.updates.phase != Phase::Idle || self.updates.saving {
+        if self.updates.phase != Phase::Idle || self.updates.saving || self.deletion.busy() {
             return;
         }
         let Some(candidate) = self.updates.candidate.clone() else {
