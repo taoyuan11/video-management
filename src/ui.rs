@@ -22,6 +22,7 @@ mod listing;
 mod motion;
 mod playback;
 mod resize;
+mod selection;
 mod settings;
 mod tag_filter;
 mod tag_management;
@@ -56,6 +57,8 @@ struct Pane {
     page_size: PageSize,
     page_input: Option<String>,
     tag_draft: BTreeSet<i64>,
+    command_menu_open: bool,
+    command_menu_focus: Option<selection::Action>,
 }
 #[derive(Debug, Clone)]
 enum Dialog {
@@ -150,6 +153,9 @@ pub enum Message {
     ToggleDetails(bool),
     ResizeDetails(bool, f32),
     ClearSelection(bool),
+    CommandMenu(bool, bool),
+    CommandMenuKey(bool, bool, iced::keyboard::key::Named, bool),
+    SelectionCommand(bool, selection::Action),
     FocusSearch(window::Id),
 }
 pub struct App {
@@ -601,6 +607,7 @@ impl App {
                 }
                 if Some(id) == self.pending {
                     self.pending = None;
+                    self.pending_pane.command_menu_open = false;
                     self.pending_pane.tag_draft.clear();
                     if self.player_window == id {
                         self.stop_player();
@@ -615,6 +622,7 @@ impl App {
             Message::OpenPending => return self.open_pending(true),
             Message::Filter(f) => {
                 self.tag_filter_open = false;
+                self.main_pane.command_menu_open = false;
                 self.page = MainPage::Library;
                 self.filter = f;
                 self.main_pane.selected.clear();
@@ -684,6 +692,7 @@ impl App {
             Message::CancelScan => self.send(Command::Cancel),
             Message::Search(p, s) => {
                 let pane = self.pane_mut(p);
+                pane.command_menu_open = false;
                 pane.search = s;
                 pane.page = 0;
                 pane.page_input = None;
@@ -698,6 +707,7 @@ impl App {
                 return listing::scroll_to_top(p);
             }
             Message::TagFilterOpen(open) => {
+                self.main_pane.command_menu_open = false;
                 self.tag_filter_open = open;
                 if open {
                     self.tag_filter_focus = 0;
@@ -1205,8 +1215,14 @@ impl App {
             Message::ClearSelection(p) => {
                 self.clear_tag_selection(p);
             }
+            Message::CommandMenu(p, open) => return self.open_command_menu(p, open),
+            Message::CommandMenuKey(p, compact, key, reverse) => {
+                return self.command_menu_key(p, compact, key, reverse);
+            }
+            Message::SelectionCommand(p, action) => return self.selection_command(p, action),
             Message::FocusSearch(id) => {
                 if self.dialog.is_none() {
+                    self.pane_mut(Some(id) == self.pending).command_menu_open = false;
                     if id == self.main {
                         self.tag_filter_open = false;
                         self.page = MainPage::Library;

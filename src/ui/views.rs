@@ -16,7 +16,8 @@ fn modified_cell(video: &VideoItem, pending: bool, colors: Palette) -> Element<'
         .style(move |_| container::Style {
             text_color: Some(colors.muted),
             ..Default::default()
-        }).into()
+        })
+        .into()
 }
 
 fn page_arrow(glyph: char, message: Option<Message>) -> Element<'static, Message> {
@@ -66,11 +67,9 @@ impl App {
             let visible = self.details_visible[usize::from(pending)];
             let enabled = visible && self.dialog.as_ref().is_none_or(|(owner, _)| *owner != id);
             row![
-                widget::responsive(move |size| self.library(
-                    pending,
-                    id,
-                    size.width < LIST_COMPACT_WIDTH,
-                )),
+                widget::responsive(move |size| {
+                    self.library(pending, size.width < LIST_COMPACT_WIDTH)
+                }),
                 motion::details(
                     visible,
                     width,
@@ -466,7 +465,7 @@ impl App {
         .into()
     }
 
-    fn library(&self, pending: bool, id: window::Id, compact: bool) -> Element<'_, Message> {
+    fn library(&self, pending: bool, compact: bool) -> Element<'_, Message> {
         let colors = self.colors();
         let pane = self.pane(pending);
         let videos = self.filtered(pending);
@@ -507,7 +506,11 @@ impl App {
             )
             .spacing(8)
             .align_y(Alignment::Center);
-        let mut content = column![container(controls).padding(16)].spacing(0);
+        let mut content = column![
+            container(controls).padding(iced::Padding::from(16).bottom(8)),
+            self.selection_commands(pending, compact),
+        ]
+        .spacing(0);
         if self.library_loading {
             content = content.push(
                 container(
@@ -648,13 +651,6 @@ impl App {
                 .id(listing::scroll_id(pending))
                 .direction(scrollable::Direction::Vertical(content_scrollbar()))
                 .height(Fill),
-            ));
-        }
-        let ids = self.ids(pending);
-        if !ids.is_empty() {
-            content = content.push(motion::enter(
-                "selection",
-                self.selection_bar(pending, id, ids.len()),
             ));
         }
         content = content
@@ -893,93 +889,6 @@ impl App {
             .into()
     }
 
-    fn selection_bar(&self, pending: bool, id: window::Id, count: usize) -> Element<'_, Message> {
-        let colors = self.colors();
-        let pane = self.pane(pending);
-        let actions: Element<_> = if pending {
-            row![
-                button(
-                    button_text(if pane.tag_draft.is_empty() {
-                        "选择标签".into()
-                    } else {
-                        format!("已选 {} 个标签", pane.tag_draft.len())
-                    })
-                    .size(12)
-                )
-                .width(Fill)
-                .style(secondary)
-                .padding([10, 14])
-                .on_press(Message::PickTags(TagAction::Import)),
-                button(button_text("导入资料库").size(12))
-                    .style(primary)
-                    .padding([10, 14])
-                    .on_press(Message::Assign(true)),
-            ]
-            .spacing(8)
-            .into()
-        } else {
-            row![
-                button(button_text("添加标签").size(12))
-                    .width(Fill)
-                    .style(primary)
-                    .padding([10, 14])
-                    .on_press(Message::PickTags(TagAction::Add)),
-                button(button_text("移除标签").size(12))
-                    .width(Fill)
-                    .style(secondary)
-                    .padding([10, 14])
-                    .on_press(Message::PickTags(TagAction::Remove)),
-            ]
-            .spacing(8)
-            .into()
-        };
-        container(
-            column![
-                row![
-                    text(format!("已选择 {count} 个视频"))
-                        .size(12)
-                        .color(colors.accent)
-                        .width(Fill),
-                    button(button_text("取消选择").size(12))
-                        .style(quiet)
-                        .padding(6)
-                        .on_press(Message::ClearSelection(pending)),
-                    button(label(TAG, "标签管理"))
-                        .style(quiet)
-                        .padding(6)
-                        .on_press(Message::ShowTagManagement),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-                actions,
-                row![
-                    button(
-                        button_text(if pending {
-                            "忽略所选"
-                        } else {
-                            "从资料库移除"
-                        })
-                        .size(12)
-                    )
-                    .style(quiet)
-                    .padding(8)
-                    .on_press(Message::Forget(pending)),
-                    space::horizontal(),
-                    button(label(DELETE, "移入回收站…"))
-                        .style(danger)
-                        .padding(8)
-                        .on_press(Message::Trash(pending, id)),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            ]
-            .spacing(8),
-        )
-        .padding(12)
-        .style(inset)
-        .into()
-    }
-
     fn details(&self, pending: bool, id: window::Id) -> Element<'_, Message> {
         let colors = self.colors();
         let focus = self
@@ -1002,17 +911,23 @@ impl App {
             } else {
                 names.join("、")
             };
-            content = content
-                .push(heading(v.title.clone(), 17).wrapping(text::Wrapping::Glyph))
-                .push(
-                    column![
+
+            let video_info_column = column![
                         detail_row(self.colors(), "文件类型", &extension(v)),
                         detail_row(self.colors(), "文件大小", &bytes_label(v.size())),
                         detail_row(self.colors(), "标签", &tags),
-                        detail_row(self.colors(), "文件位置", &format!("{} 个", v.files.len()))
                     ]
-                    .spacing(12),
-                )
+                .spacing(12);
+
+            if v.files.len() > 1 {
+                video_info_column.push(
+                   detail_row(self.colors(), "文件位置", &format!("{} 个", v.files.len()))
+               );
+            }
+
+            content = content
+                .push(heading(v.title.clone(), 17).wrapping(text::Wrapping::Glyph))
+                .push(video_info_column)
                 .push(widget::rule::horizontal(1).style(separator))
                 .push(
                     row![
@@ -1025,53 +940,26 @@ impl App {
                 content = content.push(
                     container(
                         column![
-                            row![
-                                icon(FOLDER, 14).color(colors.muted),
-                                text(file.availability.label()).size(11).color(
-                                    if file.availability == Availability::Present {
-                                        colors.success
-                                    } else {
-                                        colors.danger
-                                    }
-                                ),
-                                space::horizontal(),
-                                text(if file.state == FileState::Pending {
-                                    "待处理"
-                                } else {
-                                    ""
-                                })
-                                .size(11)
-                                .color(colors.muted)
-                            ]
-                            .spacing(8)
-                            .align_y(Alignment::Center),
                             text(file.path.to_string_lossy().to_string())
                                 .size(12)
                                 .wrapping(text::Wrapping::Glyph),
                             row![
-                                button(label(PLAY, "播放"))
-                                    .style(quiet)
-                                    .padding(6)
-                                    .on_press_maybe(
-                                        (file.availability == Availability::Present)
-                                            .then_some(Message::Play(file.id, id))
-                                    ),
-                                space::horizontal(),
                                 button(label(COPY, "复制路径"))
                                     .style(quiet)
                                     .padding(6)
                                     .on_press(Message::Copy(
                                         file.path.to_string_lossy().to_string()
-                                    ))
-                            ]
-                            .align_y(Alignment::Center),
-                            button(label(FOLDER, "在资源管理器中打开"))
+                                    )),
+                                space::horizontal(),
+                                button(label(FOLDER, "在资源管理器打开"))
                                 .style(quiet)
                                 .padding(6)
                                 .on_press_maybe(
                                     (file.availability == Availability::Present)
                                         .then(|| Message::OpenInExplorer(file.path.clone()))
                                 ),
+                            ]
+                            .align_y(Alignment::Center)
                         ]
                         .spacing(10),
                     )
@@ -1843,7 +1731,7 @@ fn detail_row<'a>(colors: Palette, label: &str, value: &str) -> Element<'a, Mess
         text(label.to_owned())
             .size(12)
             .color(colors.muted)
-            .width(80),
+            .width(50),
         text(value.to_owned())
             .size(12)
             .wrapping(text::Wrapping::Glyph)

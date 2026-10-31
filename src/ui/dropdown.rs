@@ -1,4 +1,4 @@
-//! Anchored tag menu: overlays the list without changing its layout.
+//! Anchored menus: overlay the list without changing its layout.
 use super::{Message, fluent};
 use iced::advanced::Renderer as _;
 use iced::{
@@ -17,12 +17,69 @@ pub(super) fn tag_menu<'a>(
     Element::new(Dropdown {
         trigger: trigger.into(),
         menu,
+        kind: Kind::Tags,
+        enabled: true,
     })
+}
+
+pub(super) fn command_menu<'a>(
+    trigger: impl Into<Element<'a, Message>>,
+    menu: Option<Element<'a, Message>>,
+    pending: bool,
+    compact: bool,
+    enabled: bool,
+) -> Element<'a, Message> {
+    Element::new(Dropdown {
+        trigger: trigger.into(),
+        menu,
+        kind: Kind::Commands { pending, compact },
+        enabled,
+    })
+}
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Tags,
+    Commands { pending: bool, compact: bool },
+}
+
+impl Kind {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Tags => "tag-filter",
+            Self::Commands { pending, .. } => super::selection::menu_id(pending),
+        }
+    }
+
+    fn open(self, open: bool) -> Message {
+        match self {
+            Self::Tags => Message::TagFilterOpen(open),
+            Self::Commands { pending, .. } => Message::CommandMenu(pending, open),
+        }
+    }
+
+    fn key(self, key: Named, reverse: bool) -> Message {
+        match self {
+            Self::Tags => Message::TagFilterKey(key, reverse),
+            Self::Commands { pending, compact } => {
+                Message::CommandMenuKey(pending, compact, key, reverse)
+            }
+        }
+    }
+
+    fn width(self) -> f32 {
+        match self {
+            Self::Tags => 380.0,
+            Self::Commands { .. } => 240.0,
+        }
+    }
 }
 
 struct Dropdown<'a> {
     trigger: Element<'a, Message>,
     menu: Option<Element<'a, Message>>,
+    kind: Kind,
+    enabled: bool,
 }
 
 #[derive(Default)]
@@ -79,11 +136,13 @@ impl Widget<Message, Theme, Renderer> for Dropdown<'_> {
         _: &Renderer,
         operation: &mut dyn Operation,
     ) {
-        operation.focusable(
-            Some(&"tag-filter".into()),
-            layout.bounds(),
-            tree.state.downcast_mut::<State>(),
-        );
+        if self.enabled {
+            operation.focusable(
+                Some(&self.kind.id().into()),
+                layout.bounds(),
+                tree.state.downcast_mut::<State>(),
+            );
+        }
     }
     fn update(
         &mut self,
@@ -97,6 +156,10 @@ impl Widget<Message, Theme, Renderer> for Dropdown<'_> {
         viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_mut::<State>();
+        if !self.enabled {
+            state.0 = false;
+            return;
+        }
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 state.0 = cursor.is_over(layout.bounds());
@@ -108,7 +171,7 @@ impl Widget<Message, Theme, Renderer> for Dropdown<'_> {
                 ..
             }) if state.0 && !modifiers.control() && !modifiers.alt() => {
                 if matches!(key, Named::Enter | Named::Space | Named::ArrowDown) {
-                    shell.publish(Message::TagFilterOpen(true));
+                    shell.publish(self.kind.open(true));
                     shell.capture_event();
                     return;
                 }
@@ -142,7 +205,7 @@ impl Widget<Message, Theme, Renderer> for Dropdown<'_> {
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        if tree.state.downcast_ref::<State>().0 {
+        if self.enabled && tree.state.downcast_ref::<State>().0 {
             let focus = fluent::focus_surface(theme);
             renderer.fill_quad(
                 renderer::Quad {
@@ -192,6 +255,7 @@ impl Widget<Message, Theme, Renderer> for Dropdown<'_> {
             content,
             tree: &mut tree.children[1],
             anchor: layout.bounds() + translation,
+            kind: self.kind,
         })))
     }
 }
@@ -200,6 +264,7 @@ struct Menu<'a, 'b> {
     content: &'a mut Element<'b, Message>,
     tree: &'a mut Tree,
     anchor: Rectangle,
+    kind: Kind,
 }
 
 impl overlay::Overlay<Message, Theme, Renderer> for Menu<'_, '_> {
@@ -207,7 +272,7 @@ impl overlay::Overlay<Message, Theme, Renderer> for Menu<'_, '_> {
         let below = (bounds.height - self.anchor.y - self.anchor.height - 12.0).max(0.0);
         let above = (self.anchor.y - 12.0).max(0.0);
         let max_height = below.max(above).min(360.0);
-        let width = 380.0_f32.min((bounds.width - 16.0).max(0.0));
+        let width = self.kind.width().min((bounds.width - 16.0).max(0.0));
         let mut node = self.content.as_widget_mut().layout(
             self.tree,
             renderer,
@@ -238,12 +303,12 @@ impl overlay::Overlay<Message, Theme, Renderer> for Menu<'_, '_> {
             Event::Mouse(mouse::Event::ButtonPressed(_))
                 if !cursor.is_over(content_layout.bounds()) =>
             {
-                shell.publish(Message::TagFilterOpen(false));
+                shell.publish(self.kind.open(false));
                 shell.capture_event();
                 return;
             }
             Event::Window(iced::window::Event::Unfocused) => {
-                shell.publish(Message::TagFilterOpen(false));
+                shell.publish(self.kind.open(false));
             }
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key: keyboard::Key::Named(key),
@@ -251,9 +316,9 @@ impl overlay::Overlay<Message, Theme, Renderer> for Menu<'_, '_> {
                 ..
             }) if !modifiers.control() && !modifiers.alt() => {
                 if *key == Named::Escape {
-                    shell.publish(Message::TagFilterOpen(false));
+                    shell.publish(self.kind.open(false));
                 } else {
-                    shell.publish(Message::TagFilterKey(*key, modifiers.shift()));
+                    shell.publish(self.kind.key(*key, modifiers.shift()));
                 }
                 shell.capture_event();
                 return;

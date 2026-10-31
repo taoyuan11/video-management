@@ -4,6 +4,7 @@ use iced::{keyboard::key::Named, widget::column};
 impl App {
     pub(super) fn show_page(&mut self, page: MainPage) {
         self.tag_filter_open = false;
+        self.main_pane.command_menu_open = false;
         self.page = page;
         if page != MainPage::Library && self.player_window == self.main {
             // A hidden main-window player must not start or keep playing.
