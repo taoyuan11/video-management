@@ -1,16 +1,16 @@
 //! Details divider. Drag coordinates stay anchored to the initial press even
 //! as the divider moves; retained state is local to each window's widget tree.
-use super::{Message, fluent::*};
+use super::{fluent::*, Message};
 use iced::advanced::Renderer as _;
 use iced::{
-    Element, Event, Length, Point, Rectangle, Renderer, Size, Theme,
     advanced::{
-        Clipboard, Layout, Shell, Widget, layout, mouse, renderer,
-        widget::{Operation, Tree, operation::Focusable, tree},
-    },
-    keyboard::{self, key::Named},
-    widget::{text, tooltip},
-    window,
+        layout, mouse, renderer, widget::{operation::Focusable, tree, Operation, Tree}, Clipboard, Layout, Shell,
+        Widget,
+    }, keyboard::{self, key::Named}, window, Element, Event, Length, Point, Rectangle,
+    Renderer,
+    Size
+    ,
+    Theme,
 };
 
 pub fn maximum_width(available: f32) -> f32 {
@@ -20,25 +20,12 @@ pub fn maximum_width(available: f32) -> f32 {
 
 pub fn handle<'a>(pending: bool, width: f32, maximum: f32, enabled: bool) -> Element<'a, Message> {
     let enabled = enabled && maximum > DETAILS_MIN_WIDTH;
-    tooltip(
-        Element::new(ResizeHandle {
-            pending,
-            width,
-            maximum,
-            enabled,
-        }),
-        text(if enabled {
-            "拖拽调整详情宽度；聚焦后用 ← / → 微调，Home 还原"
-        } else {
-            "窗口较窄，放大窗口后可调整详情宽度"
-        })
-        .size(12)
-        .width(220)
-        .wrapping(text::Wrapping::Glyph),
-        tooltip::Position::Top,
-    )
-    .style(panel)
-    .padding(8)
+    Element::new(ResizeHandle {
+        pending,
+        width,
+        maximum,
+        enabled,
+    })
     .into()
 }
 

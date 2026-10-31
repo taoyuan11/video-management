@@ -1210,20 +1210,41 @@ impl App {
             .style(inset)
             .into();
         };
-        let display = VideoPlayer::new(video)
+        let display = |height: Length| {
+            container(
+                VideoPlayer::new(video)
+                    .width(Fill)
+                    .height(height)
+                    .content_fit(iced::ContentFit::Contain)
+                    .on_new_frame(Message::Frame),
+            )
             .width(Fill)
-            .height(if full { Fill } else { Length::Fixed(170.0) })
-            .content_fit(iced::ContentFit::Contain)
-            .on_new_frame(Message::Frame);
+            .height(height)
+            .style(move |_| container::Style {
+                background: Some(Color::BLACK.into()),
+                border: iced::border::rounded(8),
+                ..Default::default()
+            })
+        };
+        let display: Element<'_, Message> = if full {
+            display(Fill).into()
+        } else {
+            widget::responsive(move |size| {
+                let (width, height) = video.size();
+                let height = if width > 0 && height > 0 {
+                    size.width * height as f32 / width as f32
+                } else {
+                    170.0
+                };
+                display(Length::Fixed(height)).into()
+            })
+            // The inspector scrolls vertically, so portrait videos can use their
+            // full proportional height instead of filling an unbounded height.
+            .height(Length::Shrink)
+            .into()
+        };
         column![
-            container(display)
-                .width(Fill)
-                .height(if full { Fill } else { Length::Fixed(170.0) })
-                .style(move |_| container::Style {
-                    background: Some(Color::BLACK.into()),
-                    border: iced::border::rounded(8),
-                    ..Default::default()
-                }),
+            display,
             text(&self.player_title)
                 .size(12)
                 .wrapping(text::Wrapping::Glyph),
