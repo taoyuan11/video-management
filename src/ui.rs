@@ -809,7 +809,22 @@ impl App {
                 self.details_visible[usize::from(p)] = true;
                 if needs_preview {
                     if let Some(file) = playable {
-                        return self.update(Message::Preview(file, owner));
+                        // Keep playback intent across pending loads and the
+                        // temporary pause while dragging the seek bar.
+                        let autoplay = self.player_window == owner
+                            && (self.player.as_ref().is_some_and(|video| {
+                                !video.eos()
+                                    && if self.dragging {
+                                        self.resume_after_seek
+                                    } else {
+                                        !video.paused()
+                                    }
+                            }) || self.loader.as_ref().is_some_and(|load| load.autoplay));
+                        return self.update(if autoplay {
+                            Message::Play(file, owner)
+                        } else {
+                            Message::Preview(file, owner)
+                        });
                     }
                     self.stop_player();
                 }

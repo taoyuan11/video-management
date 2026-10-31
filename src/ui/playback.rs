@@ -443,7 +443,7 @@ mod tests {
         assert_eq!(app.settings.volume, 0.35);
         assert!(app.settings.muted);
         let _ = app.update(Message::Select(false, 2));
-        wait_until_ready(&mut app);
+        wait_until_playing(&mut app);
         assert_eq!(app.settings.volume, 0.35);
         assert!(app.settings.muted);
         app.stop_player();
@@ -500,7 +500,7 @@ mod tests {
                 app.main
             };
             let file_offset = if pending { 2 } else { 1 };
-            for paused in [false, true] {
+            for (paused, seeking) in [(false, false), (true, false), (false, true), (true, true)] {
                 let _ = app.update(Message::Play(10 + file_offset, owner));
                 wait_until_playing(&mut app);
                 app.player.as_mut().unwrap().set_paused(paused);
@@ -518,15 +518,24 @@ mod tests {
                 assert_eq!(app.pane(pending).focus, Some(1));
                 assert_eq!(app.playing_file, Some(10 + file_offset));
 
+                if seeking {
+                    let _ = app.update(Message::Seek(1.5));
+                    assert!(app.player.as_ref().unwrap().paused());
+                }
                 let _ = app.update(Message::Select(pending, 2));
                 assert_eq!(app.pane(pending).focus, Some(2));
                 assert_eq!(app.player_window, owner);
                 assert_eq!(app.playing_file, Some(20 + file_offset));
                 assert!(app.player.is_none());
                 assert!(app.loader.is_some());
+                assert_eq!(app.loader.as_ref().unwrap().autoplay, !paused);
                 assert_eq!(app.position, 0.0);
                 wait_for(|| previous.current_state() == gst::State::Null);
-                wait_until_ready(&mut app);
+                if paused {
+                    wait_until_ready(&mut app);
+                } else {
+                    wait_until_playing(&mut app);
+                }
                 app.stop_player();
                 wait_for(|| app.playback_jobs.is_idle());
             }
@@ -534,34 +543,56 @@ mod tests {
     }
 
     #[test]
-    fn rapid_row_changes_cancel_old_loads_and_prepare_only_the_latest_selection() {
+    fn rapid_row_changes_preserve_playback_intent_only_in_the_same_window() {
         let (dir, mut app) = selection_app();
         write_selection_video(&dir.path().join("sample.mp4"));
-        let (release, resume) = mpsc::channel::<()>();
-        let load = Load::spawn(move |_| {
-            let _ = resume.recv();
-            Err("obsolete load failure".into())
-        })
-        .unwrap();
-        let token = load.cancel.clone();
-        app.loader = Some(load);
-        app.playing_file = Some(11);
+        for pending in [false, true] {
+            for autoplay in [false, true] {
+                let owner = if pending {
+                    app.pending.unwrap()
+                } else {
+                    app.main
+                };
+                let file_offset = if pending { 2 } else { 1 };
+                let (release, resume) = mpsc::channel::<()>();
+                let mut load = Load::spawn(move |_| {
+                    let _ = resume.recv();
+                    Err("obsolete load failure".into())
+                })
+                .unwrap();
+                load.autoplay = autoplay;
+                let token = load.cancel.clone();
+                app.loader = Some(load);
+                app.playing_file = Some(10 + file_offset);
+                app.player_window = owner;
 
-        let started = Instant::now();
-        let _ = app.update(Message::Select(false, 2));
-        assert!(started.elapsed() < Duration::from_millis(100));
-        assert!(token.load(Ordering::Acquire));
-        let second_token = app.loader.as_ref().unwrap().cancel.clone();
-        // Switching windows must choose that window's available copy too.
-        let _ = app.update(Message::Select(true, 3));
-        assert!(second_token.load(Ordering::Acquire));
-        assert_eq!(app.playing_file, Some(32));
-        assert_eq!(app.player_window, app.pending.unwrap());
-        drop(release);
-        wait_until_ready(&mut app);
-        assert_eq!(app.playing_file, Some(32));
-        app.stop_player();
-        wait_for(|| app.playback_jobs.is_idle());
+                let started = Instant::now();
+                let _ = app.update(Message::Select(pending, 2));
+                assert!(started.elapsed() < Duration::from_millis(100));
+                assert!(token.load(Ordering::Acquire));
+                assert_eq!(app.loader.as_ref().unwrap().autoplay, autoplay);
+                let second_token = app.loader.as_ref().unwrap().cancel.clone();
+                let _ = app.update(Message::Select(pending, 3));
+                assert!(second_token.load(Ordering::Acquire));
+                assert_eq!(app.playing_file, Some(30 + file_offset));
+                assert_eq!(app.player_window, owner);
+                assert_eq!(app.loader.as_ref().unwrap().autoplay, autoplay);
+                drop(release);
+                if autoplay {
+                    wait_until_playing(&mut app);
+                } else {
+                    wait_until_ready(&mut app);
+                }
+                assert_eq!(app.playing_file, Some(30 + file_offset));
+
+                // Another window starts its own paused preview using its copy.
+                let _ = app.update(Message::Select(!pending, 2));
+                assert_eq!(app.playing_file, Some(if pending { 21 } else { 22 }));
+                wait_until_ready(&mut app);
+                app.stop_player();
+                wait_for(|| app.playback_jobs.is_idle());
+            }
+        }
     }
 
     #[test]
