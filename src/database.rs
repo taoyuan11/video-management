@@ -23,7 +23,7 @@ impl Database {
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
         )?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 3 {
+        if version > 4 {
             bail!("数据库由较新版本创建，请使用较新版本的软件");
         }
         if version == 0 {
@@ -69,6 +69,11 @@ impl Database {
                 PRAGMA user_version=3;",
             )?;
             tx.commit()?;
+        }
+        if version < 4 {
+            conn.execute_batch("BEGIN IMMEDIATE;
+                CREATE TABLE root_migration (id INTEGER PRIMARY KEY CHECK(id=1), journal TEXT NOT NULL);
+                PRAGMA user_version=4; COMMIT;")?;
         }
         Ok(Self { conn })
     }
@@ -373,6 +378,98 @@ impl Database {
     pub fn remove_root(&self, path: &Path) -> Result<()> {
         self.conn
             .execute("DELETE FROM roots WHERE path_key=?", [path_key(path)])?;
+        Ok(())
+    }
+    pub fn migration_journal(&self) -> Result<Option<crate::migration::Journal>> {
+        let json: Option<String> = self
+            .conn
+            .query_row("SELECT journal FROM root_migration WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        json.map(|json| {
+            serde_json::from_str(&json).context("迁移日志无法读取，请保留资料库并恢复备份")
+        })
+        .transpose()
+    }
+
+    pub fn save_migration(&self, journal: &crate::migration::Journal) -> Result<()> {
+        self.conn.execute_batch("PRAGMA synchronous=FULL;")?;
+        self.conn.execute("INSERT INTO root_migration(id,journal) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET journal=excluded.journal",
+            [serde_json::to_string(journal)?])?;
+        // A filesystem rename must never precede durable recovery information.
+        self.conn.execute_batch("PRAGMA wal_checkpoint(FULL);")?;
+        Ok(())
+    }
+
+    pub fn clear_migration(&self) -> Result<()> {
+        self.conn.execute_batch("PRAGMA synchronous=FULL;")?;
+        self.conn.execute("DELETE FROM root_migration", [])?;
+        self.conn.execute_batch("PRAGMA synchronous=NORMAL;")?;
+        Ok(())
+    }
+
+    pub fn validate_migration(&self, source: &Path, destination: &Path) -> Result<()> {
+        use crate::migration::relative_under;
+        let roots = self.snapshot()?.roots;
+        anyhow::ensure!(
+            roots.iter().any(|p| path_key(p) == path_key(source)),
+            "原文件夹已停止监控，请重新选择"
+        );
+        anyhow::ensure!(
+            !roots
+                .iter()
+                .any(|p| relative_under(p, destination).is_some()),
+            "目标路径已有监控记录，请选择其他目录"
+        );
+        anyhow::ensure!(
+            !self
+                .files()?
+                .iter()
+                .any(|f| relative_under(&f.path, destination).is_some()),
+            "目标路径已有视频记录，请选择其他目录"
+        );
+        Ok(())
+    }
+
+    pub fn commit_migration(&mut self, journal: &crate::migration::Journal) -> Result<()> {
+        use crate::migration::relative_under;
+        self.validate_migration(&journal.source, &journal.destination)?;
+        let roots = self.snapshot()?.roots;
+        let files = self.files()?;
+        let mut committed = journal.clone();
+        committed.committed = true;
+        self.conn.execute_batch("PRAGMA synchronous=FULL;")?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        for root in roots {
+            if let Some(relative) = relative_under(&root, &journal.source) {
+                let path = journal.destination.join(relative);
+                tx.execute(
+                    "UPDATE roots SET path=?,path_key=? WHERE path_key=?",
+                    params![path.to_string_lossy(), path_key(&path), path_key(&root)],
+                )?;
+            }
+        }
+        for file in files {
+            if let Some(relative) = relative_under(&file.path, &journal.source) {
+                let path = journal.destination.join(relative);
+                tx.execute(
+                    "UPDATE files SET path=?,path_key=? WHERE id=?",
+                    params![path.to_string_lossy(), path_key(&path), file.id],
+                )?;
+            }
+        }
+        anyhow::ensure!(
+            tx.execute(
+                "UPDATE root_migration SET journal=? WHERE id=1",
+                [serde_json::to_string(&committed)?]
+            )? == 1,
+            "迁移日志已丢失，未更新资料库路径"
+        );
+        tx.commit()?;
+        self.conn.execute_batch("PRAGMA wal_checkpoint(FULL);")?;
         Ok(())
     }
     pub fn settings(&self) -> Result<Settings> {

@@ -5,6 +5,7 @@ pub mod database;
 mod explorer;
 #[cfg(feature = "gui")]
 pub mod media;
+pub mod migration;
 pub mod model;
 pub mod processing;
 pub mod scanner;

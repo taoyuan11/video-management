@@ -1,5 +1,6 @@
 use crate::{
     database::Database,
+    migration::{self, Worker as MigrationWorker},
     model::*,
     processing::{Executor, Pool},
     scanner::{self, ScanEvent, ScanRequest, ScanStats},
@@ -24,6 +25,9 @@ pub enum Command {
     Import(Vec<PathBuf>),
     AddRoots(Vec<PathBuf>),
     RemoveRoot(PathBuf),
+    MigrateRoot { source: PathBuf, parent: PathBuf },
+    CancelMigration,
+    RetryMigration,
     Scan(bool),
     Cancel,
     CreateTag(String),
@@ -56,6 +60,8 @@ pub enum Event {
     Status(String),
     Error(String),
     Stopped,
+    MigrationProgress(migration::Progress),
+    MigrationFinished(migration::Outcome),
 }
 
 pub struct Service {
@@ -138,6 +144,7 @@ struct ActiveScan {
     join: Option<JoinHandle<()>>,
     cancel: Arc<AtomicBool>,
     stats: Arc<ScanStats>,
+    explicit: Vec<PathBuf>,
 }
 impl ActiveScan {
     fn finish(&mut self) {
@@ -186,6 +193,20 @@ fn run(
     let _ = events.send(Event::UpdateSettings(
         db.update_settings().map_err(|e| format!("{e:#}")),
     ));
+    if db.migration_journal()?.is_some() {
+        let mut recovery = MigrationWorker::recover()?;
+        loop {
+            let request = recovery.events.recv().context("迁移恢复任务异常退出")?;
+            if let migration::Request::Finished(outcome) = request {
+                recovery.finish();
+                let _ = events.send(Event::MigrationFinished(outcome));
+                break;
+            }
+            if let Some(progress) = migration::answer(&mut db, request) {
+                let _ = events.send(Event::MigrationProgress(progress));
+            }
+        }
+    }
     publish(&db, events)?;
     if db.snapshot()?.videos.iter().any(VideoItem::pending) {
         let _ = events.send(Event::Pending);
@@ -211,13 +232,20 @@ fn run(
     let mut change_at: Option<Instant> = None;
     let mut shutting_down = false;
     let mut settings_error = None;
+    let mut migration: Option<MigrationWorker> = None;
+    let mut migration_paths: Option<(PathBuf, PathBuf)> = None;
+    let mut migration_blocked = db.migration_journal()?.is_some();
     loop {
         if stop.load(Ordering::Relaxed)
             && let Some(scan) = &active
         {
             scan.cancel.store(true, Ordering::Relaxed);
         }
-        match commands.recv_timeout(Duration::from_millis(75)) {
+        match commands.recv_timeout(Duration::from_millis(if migration.is_some() {
+            5
+        } else {
+            75
+        })) {
             Ok(Command::FlushAndShutdown(reply)) => {
                 *flushed = Some(reply);
                 if let Some(error) = settings_error.take() {
@@ -235,8 +263,101 @@ fn run(
                 }
             }
             Ok(command) => {
+                let retry_migration = matches!(command, Command::RetryMigration);
+                if (migration.is_some() || migration_blocked)
+                    && !matches!(
+                        command,
+                        Command::CancelMigration
+                            | Command::RetryMigration
+                            | Command::Settings(_)
+                            | Command::AppSettings(_)
+                            | Command::UpdateSettings(_)
+                            | Command::OpenInExplorer(_)
+                    )
+                {
+                    let _ =
+                        events.send(Event::Error("迁移尚未结束，请等待完成或重试清理。".into()));
+                    continue;
+                }
                 let result = (|| -> Result<()> {
                     match command {
+                        Command::CancelMigration => {
+                            if let Some(worker) = &migration {
+                                worker.cancel();
+                            }
+                        }
+                        Command::MigrateRoot { source, parent } => {
+                            let result = (|| -> Result<MigrationWorker> {
+                                let protected = vec![
+                                    data.clone(),
+                                    std::env::current_exe()?
+                                        .parent()
+                                        .context("程序路径无效")?
+                                        .to_path_buf(),
+                                ];
+                                let (source, destination) =
+                                    migration::destination(&source, &parent, &protected)?;
+                                db.validate_migration(&source, &destination)?;
+                                if let Some(a) = &active {
+                                    a.cancel.store(true, Ordering::Relaxed);
+                                }
+                                if let Some(mut a) = active.take() {
+                                    a.finish();
+                                    explicit.extend(a.explicit.iter().cloned());
+                                }
+                                for event in scan_rx.try_iter() {
+                                    if let ScanEvent::Retry(path) = &event {
+                                        explicit.push(path.clone());
+                                    }
+                                    apply_scan(event, &mut db, &mut dirty, &mut pending, &mut log)?;
+                                }
+                                if let Some(watcher) = &mut watcher {
+                                    for path in watched.drain(..) {
+                                        let _ = watcher.unwatch(&path);
+                                    }
+                                }
+                                let worker = MigrationWorker::start(
+                                    source.clone(),
+                                    parent,
+                                    protected,
+                                    false,
+                                )?;
+                                migration_paths = Some((source, destination));
+                                Ok(worker)
+                            })();
+                            match result {
+                                Ok(worker) => {
+                                    migration = Some(worker);
+                                    let _ = events.send(Event::MigrationProgress(
+                                        migration::Progress::preparing(),
+                                    ));
+                                }
+                                Err(error) => {
+                                    update_watches(&db, &mut watcher, &mut watched, events)?;
+                                    let _ =
+                                        events.send(Event::MigrationFinished(migration::Outcome {
+                                            message: format!("未开始迁移：{error:#}"),
+                                            retry: false,
+                                        }));
+                                }
+                            }
+                        }
+                        Command::RetryMigration => {
+                            if migration.is_none() && db.migration_journal()?.is_some() {
+                                migration = Some(MigrationWorker::recover()?);
+                                let _ =
+                                    events.send(Event::MigrationProgress(migration::Progress {
+                                        cancellable: false,
+                                        ..migration::Progress::preparing()
+                                    }));
+                            } else if migration.is_none() {
+                                migration_blocked = false;
+                                let _ = events.send(Event::MigrationFinished(migration::Outcome {
+                                    message: "迁移已结束，无需继续清理。".into(),
+                                    retry: false,
+                                }));
+                            }
+                        }
                         Command::Import(paths) => {
                             for p in paths {
                                 explicit.push(scanner::normalize(&p)?);
@@ -375,12 +496,54 @@ fn run(
                 if let Err(e) = result {
                     let message = format!("{e:#}");
                     let _ = writeln!(log, "{message}");
-                    let _ = events.send(Event::Error(message));
+                    if retry_migration {
+                        let _ = events.send(Event::MigrationFinished(migration::Outcome {
+                            message,
+                            retry: true,
+                        }));
+                    } else {
+                        let _ = events.send(Event::Error(message));
+                    }
                 }
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
         }
-        if shutting_down {
+        if (shutting_down || stop.load(Ordering::Relaxed))
+            && let Some(worker) = &migration
+        {
+            worker.cancel();
+        }
+        if let Some(worker) = &migration {
+            let requests: Vec<_> = worker.events.try_iter().collect();
+            for request in requests {
+                if let migration::Request::Finished(outcome) = request {
+                    if let Some(mut worker) = migration.take() {
+                        worker.finish();
+                    }
+                    migration_blocked = db.migration_journal()?.is_some();
+                    // Preserve manual imports outside this root; remap suspended requests inside it.
+                    if let Some((source, destination)) = migration_paths.take()
+                        && db.snapshot()?.roots.contains(&destination)
+                    {
+                        for path in &mut explicit {
+                            if let Some(relative) = migration::relative_under(path, &source) {
+                                *path = destination.join(relative);
+                            }
+                        }
+                    }
+                    watch_rx.try_iter().for_each(drop);
+                    change_at = None;
+                    rescan = true;
+                    dirty = true;
+                    update_watches(&db, &mut watcher, &mut watched, events)?;
+                    publish(&db, events)?;
+                    let _ = events.send(Event::MigrationFinished(outcome));
+                } else if let Some(progress) = migration::answer(&mut db, request) {
+                    let _ = events.send(Event::MigrationProgress(progress));
+                }
+            }
+        }
+        if shutting_down && migration.is_none() {
             drop(watcher.take());
             if let Some(mut a) = active.take() {
                 a.finish();
@@ -448,7 +611,12 @@ fn run(
                 let _ = events.send(Event::Error(format!("数据库更新失败：{e:#}")));
             }
         }
-        if active.is_none() && rescan && !stop.load(Ordering::Relaxed) {
+        if active.is_none()
+            && migration.is_none()
+            && !migration_blocked
+            && rescan
+            && !stop.load(Ordering::Relaxed)
+        {
             let request = ScanRequest {
                 roots: db.snapshot()?.roots,
                 known: db.files()?,
@@ -457,6 +625,7 @@ fn run(
                 durations: db.duration_status(full)?,
             };
             let cancel = Arc::new(AtomicBool::new(false));
+            let scan_explicit = request.explicit.clone();
             let stats = Arc::new(ScanStats::default());
             let (tx, c, s) = (scan_tx.clone(), cancel.clone(), stats.clone());
             let executor = pool.executor();
@@ -467,6 +636,7 @@ fn run(
                 join: Some(join),
                 cancel,
                 stats,
+                explicit: scan_explicit,
             });
             rescan = false;
             full = false;

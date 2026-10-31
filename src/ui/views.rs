@@ -44,7 +44,7 @@ impl App {
 
     pub fn view(&self, id: window::Id) -> Element<'_, Message> {
         let colors = self.colors();
-        if self.fullscreen && id == self.player_window {
+        if self.fullscreen && id == self.player_window && !self.migration.busy() {
             return container(self.player_view(id, true))
                 .padding(24)
                 .width(Fill)
@@ -185,7 +185,7 @@ impl App {
             })
             .into();
         if let Some((owner, dialog)) = &self.dialog
-            && *owner == id
+            && (*owner == id || self.migration.busy())
         {
             let modal = container(self.dialog_view(dialog))
                 .padding(28)
@@ -989,7 +989,6 @@ impl App {
             }
 
             content = content
-                .push(heading(v.title.clone(), 17).wrapping(text::Wrapping::Glyph))
                 .push(video_info_column)
                 .push(widget::rule::horizontal(1).style(separator))
                 .push(
@@ -1353,13 +1352,19 @@ impl App {
                 button(label(REFRESH, "扫描"))
                     .style(quiet)
                     .padding([4, 8])
-                    .on_press_maybe(self.progress.is_none().then_some(Message::Scan(false))),
+                    .on_press_maybe(
+                        (self.progress.is_none() && !self.migration.retry())
+                            .then_some(Message::Scan(false)),
+                    ),
             )
             .push(
                 button(button_text("完整校验").size(12))
                     .style(quiet)
                     .padding([4, 8])
-                    .on_press_maybe(self.progress.is_none().then_some(Message::Scan(true))),
+                    .on_press_maybe(
+                        (self.progress.is_none() && !self.migration.retry())
+                            .then_some(Message::Scan(true)),
+                    ),
             );
         container(bar)
             .padding([6, 20])
@@ -1534,6 +1539,7 @@ impl App {
                 .on_press(Message::Dismiss)
         };
         match dialog {
+            Dialog::Migration => self.migration_view(),
             Dialog::Tags(picker) => self.tag_picker_view(picker),
             Dialog::Updates | Dialog::UpdateAvailable => {
                 self.update_dialog(matches!(dialog, Dialog::UpdateAvailable))
@@ -1684,7 +1690,11 @@ impl App {
             }
             Dialog::Roots => {
                 let mut paths = column![].spacing(12);
-                for root in &self.snapshot.roots {
+                for (index, root) in self.snapshot.roots.iter().enumerate() {
+                    let migrate_focused =
+                        self.root_focused(&migration::RootAction::Migrate(root.clone()));
+                    let stop_focused =
+                        self.root_focused(&migration::RootAction::Stop(root.clone()));
                     paths = paths.push(
                         container(
                             column![
@@ -1697,17 +1707,53 @@ impl App {
                                 ]
                                 .spacing(12),
                                 row![
-                                    text("监控中").size(11).color(colors.success),
+                                    text(if self.migration.retry() {
+                                        "扫描已暂停"
+                                    } else {
+                                        "监控中"
+                                    })
+                                    .size(11)
+                                    .color(
+                                        if self.migration.retry() {
+                                            colors.warning
+                                        } else {
+                                            colors.success
+                                        }
+                                    ),
                                     space::horizontal(),
-                                    button(button_text("停止监控").size(12))
-                                        .style(quiet)
+                                    button(button_text("迁移").size(12))
+                                        .style(move |theme, status| button_focus(
+                                            theme,
+                                            status,
+                                            migrate_focused,
+                                            quiet(theme, status)
+                                        ))
                                         .padding(6)
-                                        .on_press(Message::RemoveRoot(root.clone()))
+                                        .on_press_maybe(
+                                            (!self.migration.retry()
+                                                && !self.migration.selecting
+                                                && !self.updates.installing()
+                                                && self.service.is_some())
+                                            .then_some(Message::PickMigration(root.clone()))
+                                        ),
+                                    button(button_text("停止监控").size(12))
+                                        .style(move |theme, status| button_focus(
+                                            theme,
+                                            status,
+                                            stop_focused,
+                                            quiet(theme, status)
+                                        ))
+                                        .padding(6)
+                                        .on_press_maybe(
+                                            (!self.migration.retry() && self.service.is_some())
+                                                .then_some(Message::RemoveRoot(root.clone()))
+                                        )
                                 ]
                                 .align_y(Alignment::Center)
                             ]
                             .spacing(8),
                         )
+                        .id(format!("monitored-root-{index}"))
                         .padding(12)
                         .style(inset),
                     );
@@ -1729,12 +1775,36 @@ impl App {
                         .center_x(Fill),
                     );
                 }
+                if self.migration.retry() {
+                    paths = paths.push(
+                        container(
+                            column![
+                                text("上次迁移尚有内容需要恢复或清理，扫描已暂停。")
+                                    .size(12)
+                                    .wrapping(text::Wrapping::Glyph),
+                                button(button_text("查看迁移结果").size(12))
+                                    .padding(6)
+                                    .style(move |theme, status| button_focus(
+                                        theme,
+                                        status,
+                                        self.root_focused(&migration::RootAction::Result),
+                                        secondary(theme, status)
+                                    ))
+                                    .on_press(Message::ShowMigration)
+                            ]
+                            .spacing(8),
+                        )
+                        .id("migration-result")
+                        .padding(12)
+                        .style(inset),
+                    );
+                }
                 column![
                     heading("监控文件夹", 22),
                     text("自动发现子文件夹中的新视频，每 60 秒检查一次。")
                         .size(13)
                         .color(colors.muted),
-                    scrollable(paths).height(240),
+                    scrollable(paths).id("monitored-roots").height(240),
                     text(format!("资料库位置：{}", self.data.display()))
                         .size(11)
                         .color(colors.muted)
@@ -1742,13 +1812,26 @@ impl App {
                     widget::rule::horizontal(1).style(separator),
                     row![
                         button(label(ADD, "添加文件夹"))
-                            .style(secondary)
+                            .style(move |theme, status| button_focus(
+                                theme,
+                                status,
+                                self.root_focused(&migration::RootAction::Add),
+                                secondary(theme, status)
+                            ))
                             .padding([10, 16])
-                            .on_press(Message::PickRoots),
+                            .on_press_maybe(
+                                (!self.migration.retry() && self.service.is_some())
+                                    .then_some(Message::PickRoots)
+                            ),
                         space::horizontal(),
                         button(button_text("完成").size(13))
                             .width(100)
-                            .style(primary)
+                            .style(move |theme, status| button_focus(
+                                theme,
+                                status,
+                                self.root_focused(&migration::RootAction::Done),
+                                primary(theme, status)
+                            ))
                             .padding([10, 16])
                             .on_press(Message::Dismiss)
                     ]

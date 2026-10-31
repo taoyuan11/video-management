@@ -19,6 +19,7 @@ mod covers;
 mod dropdown;
 pub(crate) mod fluent;
 mod listing;
+mod migration;
 mod motion;
 mod playback;
 mod resize;
@@ -76,6 +77,7 @@ enum Dialog {
         accept: bool,
     },
     Roots,
+    Migration,
     Updates,
     UpdateAvailable,
 }
@@ -138,6 +140,13 @@ pub enum Message {
     CheckUpdate,
     InstallUpdate,
     RemoveRoot(PathBuf),
+    PickMigration(PathBuf),
+    MigrationPicked(PathBuf, Option<PathBuf>),
+    MigrationValidated(Result<(PathBuf, PathBuf, PathBuf), String>),
+    ConfirmMigration,
+    CancelMigration,
+    RetryMigration,
+    ShowMigration,
     Preview(i64, window::Id),
     Play(i64, window::Id),
     Pause,
@@ -206,6 +215,7 @@ pub struct App {
     material_windows: BTreeSet<window::Id>,
     updates: updates::UpdateUi,
     update_notice: Option<String>,
+    migration: migration::MigrationUi,
 }
 impl App {
     pub fn boot(
@@ -275,6 +285,7 @@ impl App {
                 material_windows: BTreeSet::new(),
                 updates: updates::UpdateUi::default(),
                 update_notice: update_result,
+                migration: migration::MigrationUi::default(),
             },
             open.map(Message::WindowOpened),
         )
@@ -402,6 +413,24 @@ impl App {
         self.resume_after_seek = false;
     }
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if self.migration.busy() {
+            match message {
+                Message::Stop | Message::Dismiss => return self.update(Message::CancelMigration),
+                Message::Tick
+                | Message::Close(_)
+                | Message::CancelMigration
+                | Message::NavigationKey(..)
+                | Message::WindowOpened(_)
+                | Message::BackdropReady(..)
+                | Message::Copy(_) => {}
+                _ => return Task::none(),
+            }
+        }
+        if self.migration.retry()
+            && matches!(message, Message::InstallUpdate | Message::ConfirmMigration)
+        {
+            return Task::none();
+        }
         if self.updates.phase == updates::Phase::Stopping && !matches!(message, Message::Tick) {
             return Task::none();
         }
@@ -536,15 +565,30 @@ impl App {
                             self.updates.settings_received(result, true)
                         }
                         Event::Stopped => {
+                            self.migration.service_stopped();
+                            self.service.take();
                             self.app_settings_loaded = false;
                             self.settings_saving = None;
                             self.library_loading = false;
                             self.status = "后台服务已停止".into();
                             self.progress = None;
                         }
+                        Event::MigrationProgress(progress) => {
+                            self.migration.progress = Some(progress);
+                            self.progress = None;
+                            self.dialog = Some((self.main, Dialog::Migration));
+                        }
+                        Event::MigrationFinished(outcome) => {
+                            self.migration.progress = None;
+                            self.migration.outcome = Some(outcome);
+                            self.dialog = Some((self.main, Dialog::Migration));
+                        }
                     }
                 }
                 self.playback_jobs.reap();
+                if let Some(task) = self.tick_migration() {
+                    return task;
+                }
                 if let Some((targets, started)) = self.pending_trash.take() {
                     if self.playback_jobs.is_idle() {
                         self.send(Command::Trash(targets));
@@ -595,7 +639,7 @@ impl App {
                 {
                     self.position = v.position().as_secs_f64();
                 }
-                if open {
+                if open && !self.migration.busy() {
                     tasks.push(self.open_pending(false));
                 }
                 self.sync_covers();
@@ -603,6 +647,10 @@ impl App {
                 return Task::batch(tasks);
             }
             Message::Close(id) => {
+                if id == self.main && self.migration.busy() {
+                    self.migration.closing = true;
+                    return self.update(Message::CancelMigration);
+                }
                 self.material_windows.remove(&id);
                 if id == self.main {
                     self.covers.stop();
@@ -991,6 +1039,10 @@ impl App {
                 }
             }
             Message::Dismiss => {
+                if matches!(self.dialog, Some((_, Dialog::Migration))) {
+                    self.dialog = Some((self.main, Dialog::Roots));
+                    return Task::none();
+                }
                 if matches!(
                     self.dialog,
                     Some((_, Dialog::UpdateAvailable | Dialog::Updates))
@@ -1002,6 +1054,13 @@ impl App {
             Message::ShowUpdates => self.dialog = Some((self.main, Dialog::Updates)),
             Message::SettingFocus(index) => self.setting_focus = index,
             Message::NavigationKey(id, key, reverse) => {
+                if matches!(&self.dialog, Some((owner, Dialog::Roots)) if *owner == id) {
+                    return self.roots_key(key, reverse);
+                }
+                if matches!(&self.dialog, Some((owner, Dialog::Migration)) if *owner == id || self.migration.busy())
+                {
+                    return self.migration_key(key, reverse);
+                }
                 if matches!(&self.dialog, Some((owner, Dialog::Tags(_))) if *owner == id) {
                     return self.tag_picker_key(key, reverse);
                 }
@@ -1070,6 +1129,15 @@ impl App {
             Message::InstallUpdate => self.install_update(),
             Message::ShowRoots => self.dialog = Some((self.main, Dialog::Roots)),
             Message::RemoveRoot(p) => self.send(Command::RemoveRoot(p)),
+            Message::PickMigration(source) => return self.pick_migration(source),
+            Message::MigrationPicked(source, parent) => {
+                return self.migration_picked(source, parent);
+            }
+            Message::MigrationValidated(result) => self.migration_validated(result),
+            Message::ConfirmMigration => self.start_migration(false),
+            Message::CancelMigration => self.cancel_migration(),
+            Message::RetryMigration => self.start_migration(true),
+            Message::ShowMigration => self.dialog = Some((self.main, Dialog::Migration)),
             Message::Preview(id, owner) | Message::Play(id, owner) => {
                 let autoplay = matches!(message, Message::Play(..));
                 if self
@@ -1169,6 +1237,9 @@ impl App {
                 );
             }
             Message::Stop => {
+                if matches!(self.dialog, Some((_, Dialog::Migration))) {
+                    return self.update(Message::Dismiss);
+                }
                 if self.dialog.is_some() {
                     if matches!(
                         self.dialog,

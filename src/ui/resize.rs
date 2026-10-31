@@ -1,16 +1,15 @@
 //! Details divider. Drag coordinates stay anchored to the initial press even
 //! as the divider moves; retained state is local to each window's widget tree.
-use super::{fluent::*, Message};
+use super::{Message, fluent::*};
 use iced::advanced::Renderer as _;
 use iced::{
+    Element, Event, Length, Point, Rectangle, Renderer, Size, Theme,
     advanced::{
-        layout, mouse, renderer, widget::{operation::Focusable, tree, Operation, Tree}, Clipboard, Layout, Shell,
-        Widget,
-    }, keyboard::{self, key::Named}, window, Element, Event, Length, Point, Rectangle,
-    Renderer,
-    Size
-    ,
-    Theme,
+        Clipboard, Layout, Shell, Widget, layout, mouse, renderer,
+        widget::{Operation, Tree, operation::Focusable, tree},
+    },
+    keyboard::{self, key::Named},
+    window,
 };
 
 pub fn maximum_width(available: f32) -> f32 {
@@ -26,7 +25,6 @@ pub fn handle<'a>(pending: bool, width: f32, maximum: f32, enabled: bool) -> Ele
         maximum,
         enabled,
     })
-    .into()
 }
 
 struct ResizeHandle {

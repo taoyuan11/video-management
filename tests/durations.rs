@@ -32,7 +32,8 @@ fn version_two_migrates_and_durations_follow_content_across_restarts_and_replace
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
         "ALTER TABLE videos DROP COLUMN duration_ms;
-        ALTER TABLE videos DROP COLUMN duration_checked; PRAGMA user_version=2;",
+        ALTER TABLE videos DROP COLUMN duration_checked;
+        DROP TABLE root_migration; PRAGMA user_version=2;",
     )
     .unwrap();
     drop(conn);

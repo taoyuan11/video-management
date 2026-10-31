@@ -169,7 +169,10 @@ impl Covers {
 
 impl App {
     pub(super) fn sync_covers(&mut self) {
-        if self.updates.phase == updates::Phase::Stopping {
+        if self.updates.phase == updates::Phase::Stopping
+            || self.migration.busy()
+            || self.migration.retry()
+        {
             return;
         }
         let mut videos = Vec::new();

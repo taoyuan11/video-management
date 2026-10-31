@@ -289,7 +289,11 @@ impl App {
             }
         }
         self.updates.workers = running;
-        if self.updates.prompt_pending && self.dialog.is_none() && !self.fullscreen {
+        if self.updates.prompt_pending
+            && self.dialog.is_none()
+            && !self.fullscreen
+            && !self.migration.busy()
+        {
             self.dialog = Some((self.main, Dialog::UpdateAvailable));
             self.updates.prompt_pending = false;
         }
