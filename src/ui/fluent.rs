@@ -148,6 +148,18 @@ pub const DETAILS_RESIZE_WIDTH: f32 = 16.0;
 pub const LIBRARY_MIN_WIDTH: f32 = 480.0;
 pub const BUTTON_CONTENT_HEIGHT: f32 = 20.0;
 pub const PAGINATION_CONTROL_SIZE: f32 = 32.0;
+// Surfaces drawn over arbitrary imagery use the same contrast in both themes.
+// Only the backing surfaces are translucent; foreground content stays opaque.
+pub const MEDIA_BACKGROUND: Color = Color::BLACK;
+pub const MEDIA_SCRIM: Color = Color::from_rgba(0.0, 0.0, 0.0, 0.76);
+pub const MEDIA_POPUP: Color = Color::from_rgb8(32, 34, 39);
+pub const MEDIA_TEXT: Color = Color::WHITE;
+pub const MEDIA_MUTED: Color = Color::from_rgb8(188, 197, 209);
+pub const MEDIA_ACCENT: Color = Color::from_rgb8(96, 205, 255);
+pub const MEDIA_TRACK: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.38);
+pub const MEDIA_FOCUS: Color = Color::from_rgba(0.12, 0.38, 0.55, 0.85);
+pub const MEDIA_CONTROL_SIZE: f32 = 32.0;
+pub const MEDIA_MIN_HEIGHT: f32 = 128.0;
 pub const PAGINATION_ITEM_SPACING: f32 = 4.0;
 pub const PAGINATION_GROUP_SPACING: f32 = 8.0;
 pub const TOOLBAR_CONTROL_PADDING: u16 = 10;

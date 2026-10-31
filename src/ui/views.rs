@@ -46,11 +46,10 @@ impl App {
         let colors = self.colors();
         if self.fullscreen && id == self.player_window && !self.migration.busy() {
             return container(self.player_view(id, true))
-                .padding(24)
                 .width(Fill)
                 .height(Fill)
                 .style(move |_| container::Style {
-                    background: Some(colors.surface.into()),
+                    background: Some(MEDIA_BACKGROUND.into()),
                     ..Default::default()
                 })
                 .into();
@@ -1081,6 +1080,7 @@ impl App {
             );
         }
         let inspector = scrollable(content)
+            .id(player::scroll_id(pending))
             .direction(scrollable::Direction::Vertical(
                 content_scrollbar().spacing(8),
             ))
@@ -1129,30 +1129,27 @@ impl App {
     ) -> Element<'_, Message> {
         let colors = self.colors();
         let playable = self.preview_file(pending, video.id);
-        column![
-            container(
-                column![
-                    icon(VIDEO, 24).color(colors.muted),
-                    text(if playable.is_some() {
-                        "点击下方播放按钮加载视频"
-                    } else {
-                        "文件不可用，请检查存储位置"
-                    })
-                    .size(12)
-                    .color(colors.muted),
-                ]
-                .spacing(12)
-                .align_x(Alignment::Center),
-            )
-            .center_x(Fill)
-            .center_y(170)
-            .style(inset),
-            button(button_icon(PLAY, 16))
-                .style(secondary)
-                .padding(8)
-                .on_press_maybe(playable.map(|file| Message::Play(file, id))),
-        ]
-        .spacing(12)
+        container(
+            column![
+                icon(VIDEO, 24).color(colors.muted),
+                text(if playable.is_some() {
+                    "点击播放按钮加载视频"
+                } else {
+                    "文件不可用，请检查存储位置"
+                })
+                .size(12)
+                .color(colors.muted),
+                button(button_icon(PLAY, 16))
+                    .style(secondary)
+                    .padding(8)
+                    .on_press_maybe(playable.map(|file| Message::Play(file, id))),
+            ]
+            .spacing(12)
+            .align_x(Alignment::Center),
+        )
+        .center_x(Fill)
+        .center_y(170)
+        .style(inset)
         .into()
     }
 
@@ -1209,24 +1206,8 @@ impl App {
             .style(inset)
             .into();
         };
-        let display = |height: Length| {
-            container(
-                VideoPlayer::new(video)
-                    .width(Fill)
-                    .height(height)
-                    .content_fit(iced::ContentFit::Contain)
-                    .on_new_frame(Message::Frame),
-            )
-            .width(Fill)
-            .height(height)
-            .style(move |_| container::Style {
-                background: Some(Color::BLACK.into()),
-                border: iced::border::rounded(8),
-                ..Default::default()
-            })
-        };
-        let display: Element<'_, Message> = if full {
-            display(Fill).into()
+        if full {
+            player::view(self, Fill)
         } else {
             widget::responsive(move |size| {
                 let (width, height) = video.size();
@@ -1235,74 +1216,12 @@ impl App {
                 } else {
                     170.0
                 };
-                display(Length::Fixed(height)).into()
+                player::view(self, Length::Fixed(height.max(MEDIA_MIN_HEIGHT)))
             })
-            // The inspector scrolls vertically, so portrait videos can use their
-            // full proportional height instead of filling an unbounded height.
+            // Keep portrait videos proportional inside the scrolling inspector.
             .height(Length::Shrink)
             .into()
-        };
-        column![
-            display,
-            text(&self.player_title)
-                .size(12)
-                .wrapping(text::Wrapping::Glyph),
-            slider(
-                0.0..=video.duration().as_secs_f64().max(0.1),
-                self.position,
-                Message::Seek
-            )
-            .step(0.1)
-            .on_release(Message::SeekRelease),
-            row![
-                button(button_icon(
-                    if video.paused() { PLAY } else { '\u{E769}' },
-                    16
-                ))
-                .padding(8)
-                .style(secondary)
-                .on_press(Message::Pause),
-                text(format!(
-                    "{} / {}",
-                    time_label(self.position),
-                    time_label(video.duration().as_secs_f64())
-                ))
-                .size(11)
-                .color(colors.muted),
-                space::horizontal(),
-                button(button_icon(if full { '\u{E73F}' } else { '\u{E740}' }, 15))
-                    .padding(8)
-                    .style(quiet)
-                    .on_press(Message::Fullscreen(id)),
-                button(button_icon('\u{E71A}', 14))
-                    .padding(8)
-                    .style(quiet)
-                    .on_press(Message::Stop),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center),
-            row![
-                button(button_icon(
-                    if self.settings.muted {
-                        '\u{E74F}'
-                    } else {
-                        '\u{E767}'
-                    },
-                    16
-                ))
-                .padding(8)
-                .style(quiet)
-                .on_press(Message::Mute),
-                slider(0.0..=1.0, self.settings.volume, Message::Volume).step(0.01),
-                text(format!("{}%", (self.settings.volume * 100.0).round()))
-                    .size(11)
-                    .color(colors.muted),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        ]
-        .spacing(12)
-        .into()
+        }
     }
 
     fn status_bar(&self) -> Element<'_, Message> {

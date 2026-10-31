@@ -1,12 +1,12 @@
 use iced::{
     Alignment, Color, Element, Fill, Length, Subscription, Task,
     widget::{
-        self, checkbox, container, pick_list, progress_bar, row, scrollable, slider, space, stack,
-        text, text_input,
+        self, checkbox, container, pick_list, progress_bar, row, scrollable, space, stack, text,
+        text_input,
     },
     window,
 };
-use iced_video_player::{Video, VideoPlayer};
+use iced_video_player::Video;
 use std::{collections::BTreeSet, path::PathBuf, time::Duration};
 use video_management::{
     model::*,
@@ -22,6 +22,7 @@ mod listing;
 mod migration;
 mod motion;
 mod playback;
+mod player;
 mod resize;
 mod selection;
 mod settings;
@@ -1070,10 +1071,15 @@ impl App {
                 if id == self.main && self.page == MainPage::Settings && self.dialog.is_none() {
                     self.settings_key(key);
                 } else if self.dialog.is_none() && key == iced::keyboard::key::Named::Tab {
-                    return if reverse {
+                    let focus = if reverse {
                         widget::operation::focus_previous()
                     } else {
                         widget::operation::focus_next()
+                    };
+                    return if id == self.player_window && !self.fullscreen {
+                        focus.chain(player::reveal_focus(Some(id) == self.pending))
+                    } else {
+                        focus
                     };
                 }
             }
@@ -1203,7 +1209,9 @@ impl App {
                 }
             }
             Message::SeekRelease => {
-                if let Some(v) = &mut self.player {
+                if self.dragging
+                    && let Some(v) = &mut self.player
+                {
                     if let Err(e) = v.seek(Duration::from_secs_f64(self.position.max(0.0)), false) {
                         self.error = Some(format!("跳转失败：{e}"));
                     }
@@ -1226,6 +1234,9 @@ impl App {
                 self.send(Command::Settings(self.settings.clone()));
             }
             Message::Fullscreen(id) => {
+                if self.dragging {
+                    let _ = self.update(Message::SeekRelease);
+                }
                 self.fullscreen = !self.fullscreen;
                 return window::set_mode(
                     id,
@@ -1251,6 +1262,9 @@ impl App {
                     return Task::none();
                 }
                 if self.fullscreen {
+                    if self.dragging {
+                        let _ = self.update(Message::SeekRelease);
+                    }
                     self.fullscreen = false;
                     return window::set_mode(self.player_window, window::Mode::Windowed);
                 }

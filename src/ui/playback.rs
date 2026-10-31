@@ -249,6 +249,47 @@ mod tests {
     }
 
     #[test]
+    fn seeking_and_fullscreen_transitions_preserve_playback_and_volume() {
+        let (dir, mut app) = selection_app();
+        write_selection_video(&dir.path().join("sample.mp4"));
+        let _ = app.update(Message::Select(false, 1));
+        wait_until_ready(&mut app);
+        for paused in [true, false] {
+            app.player.as_mut().unwrap().set_paused(paused);
+            let _ = app.update(Message::Seek(0.5));
+            assert!(app.dragging);
+            assert!(app.player.as_ref().unwrap().paused());
+            let _ = app.update(Message::SeekRelease);
+            assert!(!app.dragging);
+            assert_eq!(app.player.as_ref().unwrap().paused(), paused);
+            // Duplicate release after mouse-up must not change playback state.
+            let _ = app.update(Message::SeekRelease);
+            assert_eq!(app.player.as_ref().unwrap().paused(), paused);
+
+            let _ = app.update(Message::Seek(1.0));
+            let _ = app.update(Message::Fullscreen(app.main));
+            assert!(app.fullscreen);
+            assert!(!app.dragging);
+            assert_eq!(app.player.as_ref().unwrap().paused(), paused);
+            let _ = app.update(Message::Seek(1.5));
+            let _ = app.update(Message::Stop);
+            assert!(!app.fullscreen);
+            assert!(!app.dragging);
+            assert_eq!(app.player.as_ref().unwrap().paused(), paused);
+        }
+        let _ = app.update(Message::Volume(0.35));
+        let _ = app.update(Message::Mute);
+        assert_eq!(app.settings.volume, 0.35);
+        assert!(app.settings.muted);
+        let _ = app.update(Message::Select(false, 2));
+        wait_until_ready(&mut app);
+        assert_eq!(app.settings.volume, 0.35);
+        assert!(app.settings.muted);
+        app.stop_player();
+        wait_for(|| app.playback_jobs.is_idle());
+    }
+
+    #[test]
     fn selecting_a_video_loads_paused_and_the_player_button_starts_playback() {
         let (dir, mut app) = selection_app();
         write_selection_video(&dir.path().join("sample.mp4"));
