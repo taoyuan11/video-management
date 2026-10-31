@@ -80,9 +80,8 @@ impl Database {
 
     pub fn snapshot(&self) -> Result<Snapshot> {
         let mut s = Snapshot::default();
-        let mut q = self
-            .conn
-            .prepare("SELECT id,name FROM tags ORDER BY name COLLATE NOCASE,id")?;
+        // IDs follow creation order and stay unchanged when tags are renamed.
+        let mut q = self.conn.prepare("SELECT id,name FROM tags ORDER BY id")?;
         s.tags = q
             .query_map([], |r| {
                 Ok(Tag {
