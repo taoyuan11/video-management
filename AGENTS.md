@@ -9,13 +9,13 @@
 
 ## Design system
 
-- Read [design.md](design.md) before adding or changing UI. It is the project's design baseline; update it when shared design rules change.
+- Read [design.md](design.md) before adding or changing UI. It defines reusable visual, layout, control, and accessibility rules, not product features or page workflows. Update it when shared design rules change; keep product-specific behavior out of it.
 - Follow the Windows 11 Fluent light and dark styles: native Desktop Acrylic, theme-appropriate translucent surfaces, blue accent, soft corners, subtle borders and shadows, and opaque text, icons, and video.
-- Reuse colors, typography, Segoe Fluent Icons, and control styles from `src/ui/fluent.rs`; follow the layout hierarchy in `src/ui/views.rs`. Centralize shared visual rules instead of introducing competing styles.
-- Preserve the navigation, library, and collapsible details structure, contextual batch commands, readable long paths, and the supported minimum window sizes documented in `design.md`.
+- Reuse colors, typography, Segoe Fluent Icons, and control styles from `src/ui/fluent.rs`. Centralize shared visual rules instead of introducing competing styles.
+- Consult the existing implementation and [README.md](README.md) for product behavior, page structure, and supported window sizes. Preserve existing navigation, collapsible details, contextual commands, and minimum window sizes unless the task calls for changing them; these are not defined by `design.md`.
 - Keep native window behavior and file pickers, bundled Source Han Sans typography, and the opaque fallback when DWM material or graphics transparency is unavailable on Windows 11.
 - Use concise Chinese copy and consistent product terms. Provide visible focus and disabled states, text alongside status colors, and contextual empty states. Do not add hover text tooltips to buttons, including icon-only actions. Preserve keyboard shortcuts and path confirmation for recycling files.
-- For UI changes, review the code against `design.md`, including minimum window sizes, long content, interaction states, and the opaque fallback when changing materials. The user will perform visual and interactive UI checks.
+- For UI changes, review the code against `design.md` for layout, long content (including paths), control states, and theme consistency. Check the minimum window sizes defined by the application, and the opaque fallback when changing materials. The user will perform visual and interactive UI checks.
 
 ## Verification
 
